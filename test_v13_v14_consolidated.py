@@ -1394,7 +1394,7 @@ def test_g4_3_full_data_renders_all_sections():
 def test_g5_1_tips_dict_has_performance_entries():
     from reporting.tooltip_formatter import TIPS
     expected = ['TOTAL TRACKED', 'CLOSED', 'OPEN', 'HIT RATE (T1+)', 'SL RATE',
-                'AVG DAYS → T1', 'AVG DAYS → T2', 'AVG DAYS → T3', 'AVG DAYS → SL',
+                'AVG DAYS → TARGET', 'AVG DAYS → SL',  # v17.8.1 single Target
                 'Max Runup %', 'Max DD %', 'Hit Rate', 'Days Held', 'Archetype']
     for k in expected:
         assert k in TIPS, f"Missing tooltip for: {k}"
@@ -2096,19 +2096,17 @@ def test_g13_performance_sheet_value_correctness_audit():
         assert cv(hr+2, 4) == "60.0%", f"HIT RATE = {cv(hr+2,4)!r}, expected 60.0%"
         assert cv(hr+2, 5) == "23.3%", f"SL RATE = {cv(hr+2,5)!r}, expected 23.3%"
 
-        # === Outcome breakdown counts ===
-        assert cv(11, 1) == "10", f"T1 count = {cv(11,1)!r}"
-        assert cv(11, 2) == "5",  f"T2 count = {cv(11,2)!r}"
-        assert cv(11, 3) == "3",  f"T3 count = {cv(11,3)!r}"
-        assert cv(11, 4) == "7",  f"SL count = {cv(11,4)!r}"
-        assert cv(11, 5) == "5",  f"EXPIRED count = {cv(11,5)!r}"
+        # === Outcome breakdown counts (v17.8.1: single Target) ===
+        # col1 TARGET HIT = T1+T2+T3 = 10+5+3 = 18; col2 SL; col3 EXPIRED.
+        assert cv(11, 1) == "18", f"TARGET HIT count = {cv(11,1)!r}"
+        assert cv(11, 2) == "7",  f"SL count = {cv(11,2)!r}"
+        assert cv(11, 3) == "5",  f"EXPIRED count = {cv(11,3)!r}"
 
         # === SPEED METRICS ===
         sp = find_row("SPEED METRICS")
-        assert cv(sp+2, 1) == "20.0 days", f"AVG T1 = {cv(sp+2,1)!r}"
-        assert cv(sp+2, 2) == "35.0 days", f"AVG T2 = {cv(sp+2,2)!r}"
-        assert cv(sp+2, 3) == "60.0 days", f"AVG T3 = {cv(sp+2,3)!r}"
-        assert cv(sp+2, 4) == "10.0 days", f"AVG SL = {cv(sp+2,4)!r}"
+        # v17.8.1: single Target — speed is TARGET(1), SL(2); T2/T3 removed.
+        assert cv(sp+2, 1) == "20.0 days", f"AVG TARGET = {cv(sp+2,1)!r}"
+        assert cv(sp+2, 2) == "10.0 days", f"AVG SL = {cv(sp+2,2)!r}"
 
         # === MISSED RUNUP DIAGNOSTIC ===
         mr = find_row("MISSED RUNUP DIAGNOSTIC")
@@ -2356,8 +2354,10 @@ def test_g15_sl_t_v14_6_multi_factor_formula():
     ]
     for s in test_scenarios:
         r = _compute_sl_t_v14_6(*s)
-        assert r['rr_t1'] >= 1.5, (
-            f"R:R below 1.5 for scenario {s}: got {r['rr_t1']} "
+        # v17.8.1: target is pure regime multiplier x SL; min R:R floor is
+        # now 1.3 (calm), not 1.5. Fair-value/horizon-cap no longer apply.
+        assert r['rr_t1'] >= 1.3 - 1e-6, (
+            f"R:R below 1.3 for scenario {s}: got {r['rr_t1']} "
             f"(SL={r['sl_pct']}%, T1={r['t1_pct']}%)"
         )
 
@@ -2386,12 +2386,12 @@ def test_g15_sl_t_v14_6_multi_factor_formula():
     # Test 7: Missing ATR triggers cap-based fallback
     r_no_atr = _compute_sl_t_v14_6(100, None, 130, 'SMALL', 'Industrials', 'POSITIONAL')
     assert r_no_atr['sl_pct'] > 0, "Missing ATR should still produce a valid SL"
-    assert r_no_atr['rr_t1'] >= 1.5
+    assert r_no_atr['rr_t1'] >= 1.3
 
     # Test 8: CFV ≤ CMP — formula should still produce valid output
     r_no_cfv = _compute_sl_t_v14_6(100, 2.5, 0, 'MID', 'Industrials', 'POSITIONAL')
     assert r_no_cfv['t1'] > 100, "T1 must be above CMP even without CFV"
-    assert r_no_cfv['rr_t1'] >= 1.5
+    assert r_no_cfv['rr_t1'] >= 1.3
 
     r_neg_cfv = _compute_sl_t_v14_6(100, 2.5, 80, 'MID', 'Industrials', 'POSITIONAL')
     assert r_neg_cfv['t1'] > 100, "T1 must be above CMP even if CFV < CMP"
@@ -2417,7 +2417,7 @@ def test_g15_sl_t_v14_6_multi_factor_formula():
     ]
     for pos in real_positions:
         r = _compute_sl_t_v14_6(*pos)
-        assert r['rr_t1'] >= 1.5, f"Real pos failed R:R: {pos} → {r}"
+        assert r['rr_t1'] >= 1.3, f"Real pos failed R:R: {pos} → {r}"
 
     return "✅ v14.6 multi-factor SL/T formula passes all 10 sub-tests"
 
@@ -3118,18 +3118,18 @@ def test_g22_v15_5_risk_parity_wired_to_excel():
         f"v15.5: GOLD_GROUPS span sum {gold_total_span} != GOLD_COLS len {len(GOLD_COLS)}"
     )
 
-    # TRADE PLAN band must span 9 cols (was 7 pre-v15.5)
+    # v17.8.1: TRADE PLAN band now spans 7 cols (Target 2/3 removed; was 9).
     trade_plan_fd = next(
         (sp for (sc, nm, col, sp) in FULL_GROUPS if nm == "TRADE PLAN"), None
     )
-    assert trade_plan_fd == 9, (
-        f"v15.5: Full Dashboard TRADE PLAN band should span 9 cols, got {trade_plan_fd}"
+    assert trade_plan_fd == 7, (
+        f"v17.8.1: Full Dashboard TRADE PLAN band should span 7 cols, got {trade_plan_fd}"
     )
     trade_plan_gold = next(
         (sp for (sc, nm, col, sp) in GOLD_GROUPS if nm == "TRADE PLAN"), None
     )
-    assert trade_plan_gold == 9, (
-        f"v15.5: Gold sheet TRADE PLAN band should span 9 cols, got {trade_plan_gold}"
+    assert trade_plan_gold == 7, (
+        f"v17.8.1: Gold sheet TRADE PLAN band should span 7 cols, got {trade_plan_gold}"
     )
 
     # ----- Test 5: Tooltips exist for the 2 new columns -----
@@ -3150,7 +3150,7 @@ def test_g22_v15_5_risk_parity_wired_to_excel():
     perf_open_cols = [
         "Symbol", "Rec Date", "Time Horizon", "Days Held", "Days Left",
         "Re-app", "CMP at Rec", "Current Price", "P&L %", "Max Runup %",
-        "SL", "T1", "T2", "T3", "Score", "\u26a0", "Trailing", "Regime",
+        "SL", "Target", "Score", "\u26a0", "Trailing", "Regime",  # v17.8.1
     ]
     missing = [c for c in perf_open_cols if c not in TIPS]
     assert not missing, (
@@ -3260,8 +3260,8 @@ def test_g23_v15_7_minor_cleanups():
     )
     # Count tuples in open_cols — should be 20
     tuple_count = len(re.findall(r'\("[^"]+"\s*,\s*\d+\)', open_cols_text))
-    assert tuple_count == 23, (
-        f"v17.4: Performance open_cols should have 23 tuples, got {tuple_count}"
+    assert tuple_count == 21, (
+        f"v17.8: Performance open_cols should have 21 tuples (T2/T3 removed), got {tuple_count}"
     )
 
     # ----- Cleanup 3b: schema has the new columns -----
@@ -4660,7 +4660,7 @@ def test_g34_v17_0_performance_fixes():
         f"POSITIONAL T1 ({_r_pos['t1_pct']:.1f}%) — 30-day window needs a "
         f"reachable target"
     )
-    assert _r_short['rr_t1'] >= 1.5, (
+    assert _r_short['rr_t1'] >= 1.3, (
         f"v17.0: R:R floor of 1.5 must survive the tighter SHORT TERM stop, "
         f"got {_r_short['rr_t1']:.2f}"
     )

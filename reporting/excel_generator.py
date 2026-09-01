@@ -50,13 +50,13 @@ FULL_GROUPS = [
     (76, "SHAREHOLDING",    "7C3AED",9),(85,"QUALITY SCORES",  "0D9488",4),
     (89, "PIPELINE / OB",   "1D4ED8",5),(94,"EARLY DETECTION", "B45309",3),
     (97, "TECHNICAL",       "6D28D9",14),(111,"BALANCE SHEET", "D97706",2),
-    # v15.5: TRADE PLAN widened 7→9 cols (added Suggested Alloc % + Sizing
-    # Rationale after Risk Level). Schema = (START_col, name, color, span).
-    # TRADE PLAN: cols 113-121 (start=113, span=9)
-    # NEWS & RISK: cols 122-125 (start=122, span=4) — shifted right by 2
-    # ANALYSIS SUMMARY: col 126 (start=126, span=1) — shifted right by 2
-    (113,"TRADE PLAN",      "059669",9),(122,"NEWS & RISK",    "475569",4),
-    (126,"ANALYSIS SUMMARY","0F172A",1),
+    # v17.8.1: TRADE PLAN span 9→7 after removing Target 2 & Target 3 columns
+    # (single-Target model). All groups after it shift left by 2:
+    #   TRADE PLAN:       cols 113-119 (start=113, span=7)
+    #   NEWS & RISK:      cols 120-123 (start=120, span=4)
+    #   ANALYSIS SUMMARY: col 124      (start=124, span=1)
+    (113,"TRADE PLAN",      "059669",7),(120,"NEWS & RISK",    "475569",4),
+    (124,"ANALYSIS SUMMARY","0F172A",1),
 ]
 
 FULL_COLS = [
@@ -134,7 +134,7 @@ FULL_COLS = [
     ("Resist 1 (₹)",12,"resist_1"),("Resist 2 (₹)",12,"resist_2"),
     ("BS Health Flag",13,"bs_status"),("BS Health Note",40,"bs_flags"),
     ("Entry Range (₹)",15,"entry_range"),("Stop Loss (₹)",13,"stop_loss"),
-    ("Target 1 (₹)",12,"t1"),("Target 2 (₹)",12,"t2"),("Target 3 (₹)",12,"t3"),
+    ("Target (₹)",12,"t1"),  # v17.8.1: single Target; T2/T3 hidden
     ("Time Horizon",22,"horizon"),("Risk Level",11,"risk_level"),
     # v15.5: institutional risk-parity (volatility-adjusted) position sizing.
     # See risk/correlation_aware_sizing.py — base size = 1% risk budget /
@@ -162,8 +162,10 @@ GOLD_GROUPS = [
     (1,"IDENTITY","1E293B",6),(7,"SCORES","7C3AED",5),(12,"PRICE","0369A1",1),
     (13,"WEEKLY CHANGE %","0F766E",4),(17,"FAIR VALUE","B45309",3),
     (20,"KEY METRICS","0891B2",6),(26,"EARLY DETECTION","B45309",3),
-    (29,"TECHNICAL","6D28D9",3),(32,"TRADE PLAN","059669",9),
-    (41,"NEWS","475569",2),(43,"ANALYSIS SUMMARY","0F172A",1),
+    # v17.8.1: Gold TRADE PLAN span 9→7 (Target 2/3 removed); NEWS 41→39,
+    # ANALYSIS SUMMARY 43→41. New sum = 41 = len(GOLD_COLS).
+    (29,"TECHNICAL","6D28D9",3),(32,"TRADE PLAN","059669",7),
+    (39,"NEWS","475569",2),(41,"ANALYSIS SUMMARY","0F172A",1),
 ]
 
 GOLD_COLS = [
@@ -195,7 +197,7 @@ GOLD_COLS = [
     # v16.3: RSI widened from 9 to 11.
     ("RSI (14)",11,"rsi"),("Pattern",24,"chart_pattern"),
     ("Entry Range (₹)",16,"entry_range"),("Stop Loss (₹)",13,"stop_loss"),
-    ("Target 1 (₹)",13,"t1"),("Target 2 (₹)",13,"t2"),("Target 3 (₹)",13,"t3"),
+    ("Target (₹)",13,"t1"),  # v17.8.1: single Target; T2/T3 hidden
     ("Time Horizon",22,"horizon"),("Risk Level",11,"risk_level"),
     # v15.5: risk-parity sizing surfaced on Gold sheet (these are the picks
     # users actually trade — most useful place to see allocation guidance)
@@ -922,16 +924,9 @@ GLOSSARY_DATA = [
      "Mandatory stop loss price. Exit the trade if CMP closes below this on a daily basis. "
      "Set at ~3–5% below entry, or just below key support level. "
      "ALWAYS place stop loss before entering any trade.","All sheets"),
-    ("TRADE PLAN","Target 1 (₹)",
-     "First price target = nearest resistance level. "
-     "Book 40–50% of position at T1. Let rest run with trailing stop.","All sheets"),
-    ("TRADE PLAN","Target 2 (₹)",
-     "Second price target = next resistance zone. "
-     "Book another 30% at T2. Trail stop to entry cost.","All sheets"),
-    ("TRADE PLAN","Target 3 (₹)",
-     "Final price target = CFV (Composite Fair Value). "
-     "Hold remaining 20–30% position for full re-rating. "
-     "Only applicable for BUY stocks with positive MoS.","All sheets"),
+    ("TRADE PLAN","Target (₹)",
+     "v17.8.1: single price target = regime_multiplier × SL "
+     "(1.3 calm / 1.5 normal / 1.8 volatile). Book/trail per your plan.","All sheets"),
     # v15.7 dedup: previously had duplicate Suggested Alloc % / Sizing Rationale
     # entries here (with "(v15.5)" suffix). The non-suffixed entries earlier in
     # the Trade Summary glossary block (rows 87-88 of rendered output) carry
@@ -2076,7 +2071,7 @@ class ExcelGeneratorV6:
         hdrs=[("Symbol",12),("Company",25),("CMP (₹)",11),("CFV (₹)",12),
               ("MoS %",10),("Chg% [2-Wk]",13),("Chg% [4-Wk]",13),
               ("Chg% [8-Wk]",13),("Entry Range (₹)",16),("Stop Loss (₹)",13),
-              ("Target 1 (₹)",12),("Target 2 (₹)",12),("Target 3 (₹)",12),
+              ("Target (₹)",12),  # v17.8.1: single Target
               ("R:R Ratio",11),("Time Horizon",22),("Risk Level",11)]
         ws.row_dimensions[2].height=32
         for ci,(h,w) in enumerate(hdrs,1):
@@ -2087,8 +2082,8 @@ class ExcelGeneratorV6:
         # Session 23: "Upside %" removed from Trade Summary too (duplicated MoS %)
         _ts_hdrs=["Symbol","Company","CMP (₹)","CFV (₹)","MoS %",
                    "Chg% [2-Wk]","Chg% [4-Wk]","Chg% [8-Wk]",
-                   "Entry Range (₹)","Stop Loss (₹)","Target 1 (₹)",
-                   "Target 2 (₹)","Target 3 (₹)","R:R Ratio",
+                   "Entry Range (₹)","Stop Loss (₹)","Target (₹)",
+                   "R:R Ratio",
                    "Time Horizon","Risk Level"]
         self._apply_col_tips(ws, 2, _ts_hdrs)
         ws.freeze_panes="A3"
@@ -2468,14 +2463,15 @@ class ExcelGeneratorV6:
         c = ws.cell(9,1,"  Outcome breakdown of closed picks")
         c.fill = _f(LG); c.font = _ft(False,NAVY,9,True); c.alignment = _al("left")
         ws.row_dimensions[9].height = 16
-        _metric(10, 1, "T1 HIT", n_t1, value_fill="D1FAE5",  label_fill="A7F3D0", val_color="065F46")
-        _metric(10, 2, "T2 HIT", n_t2, value_fill="A7F3D0",  label_fill="6EE7B7", val_color="065F46")
-        _metric(10, 3, "T3 HIT", n_t3, value_fill="6EE7B7",  label_fill="34D399", val_color="065F46")
-        _metric(10, 4, "SL HIT", n_sl, value_fill="FECACA",  label_fill="FCA5A5", val_color="991B1B")
-        _metric(10, 5, "EXPIRED",n_ex, value_fill="E5E7EB",  label_fill="D1D5DB", val_color="374151")
+        # v17.8.1: single-Target model — T2/T3 boxes removed. "TARGET HIT" is
+        # T1_HIT (plus any legacy T2/T3 hits folded in, so historical rows still
+        # count). Columns reflowed 1-4 with no gap.
+        _metric(10, 1, "TARGET HIT", n_t1 + n_t2 + n_t3, value_fill="D1FAE5", label_fill="A7F3D0", val_color="065F46")
+        _metric(10, 2, "SL HIT", n_sl, value_fill="FECACA",  label_fill="FCA5A5", val_color="991B1B")
+        _metric(10, 3, "EXPIRED",n_ex, value_fill="E5E7EB",  label_fill="D1D5DB", val_color="374151")
         # v16.5: TRAIL_SL — trailing-stop exits (break-even / locked profit).
         # Amber, not red — these are successful risk control, not failures.
-        _metric(10, 6, "TRAIL SL",n_tr, value_fill="FEF3C7",  label_fill="FDE68A", val_color="92400E")
+        _metric(10, 4, "TRAIL SL",n_tr, value_fill="FEF3C7",  label_fill="FDE68A", val_color="92400E")
 
         # ── Section 2: SPEED ──────────────────────────────────────────────
         ws.merge_cells(start_row=13,start_column=1,end_row=13,end_column=10)
@@ -2488,10 +2484,9 @@ class ExcelGeneratorV6:
             if sub.empty: return "—"
             return f"{sub['days_to_outcome'].mean():.1f} days"
 
-        _metric(14, 1, "AVG DAYS → T1", _avg_days("T1_HIT"))
-        _metric(14, 2, "AVG DAYS → T2", _avg_days("T2_HIT"))
-        _metric(14, 3, "AVG DAYS → T3", _avg_days("T3_HIT"))
-        _metric(14, 4, "AVG DAYS → SL", _avg_days("SL_HIT"),
+        # v17.8.1: single-Target — T2/T3 speed boxes removed, reflowed to 1-2.
+        _metric(14, 1, "AVG DAYS → TARGET", _avg_days("T1_HIT"))
+        _metric(14, 2, "AVG DAYS → SL", _avg_days("SL_HIT"),
                 value_fill="FEE2E2", label_fill="FECACA", val_color="991B1B")
 
         # ── Section 3: DIAGNOSTIC BREAKDOWNS ──────────────────────────────
@@ -2860,7 +2855,11 @@ class ExcelGeneratorV6:
         open_cols = [("Symbol",14),("Rec Date",12),("Time Horizon",15),("Days Held",12),
                      ("Days Left",12),("Re-app",10),("CMP at Rec",12),("Current Price",13),
                      ("P&L %",10),("Max Runup %",13),
-                     ("SL",18),("T1",18),("T2",18),("T3",18),
+                     ("SL",18),("Target",18),
+                     # v17.8: single Target (= T1). T2/T3 retained in DB &
+                     # tracker but hidden from the sheet (unused in practice).
+                     # Schema/tracker intact (reversible); view + hit-rate
+                     # metric now use one target level.
                      ("Score",10),("⚠",6),
                      ("Trailing",14),("Regime",11),
                      # v15.7: risk-parity sizing surfaced on Performance sheet
@@ -2963,7 +2962,7 @@ class ExcelGeneratorV6:
                     round(_cur_price, 2),
                     f"{float(row_o.get('current_pnl_pct',0) or 0):+.1f}%",
                     f"{float(row_o.get('max_runup_pct',0) or 0):+.1f}%",
-                    _sl_str, _t1_str, _t2_str, _t3_str,
+                    _sl_str, _t1_str,
                     round(float(row_o.get("composite_score",0) or 0), 1),
                     "⚠" if _is_approaching else "",
                     _trail_label,           # v15.0 col 17
@@ -2986,27 +2985,23 @@ class ExcelGeneratorV6:
                 if pnl > 0:    ws.cell(next_row, 9).font = _ft(True, "065F46", 9)
                 elif pnl < 0:  ws.cell(next_row, 9).font = _ft(True, "991B1B", 9)
                 # v14.4: color SL column (11) red — always represents downside risk.
-                # Color target columns (12/13/14) green — always represents upside.
-                # Subtle text color, not bold (avoids visual overwhelm with so many cols).
+                # v17.8: single-Target layout — SL=11, Target=12 (T2/T3 removed,
+                # every following column shifted left by 2). SL red, Target green.
                 if _sl_v > 0:
                     ws.cell(next_row, 11).font = _ft(False, "991B1B", 9)
                 if _t1_v > 0:
                     ws.cell(next_row, 12).font = _ft(False, "065F46", 9)
-                if _t2_v > 0:
-                    ws.cell(next_row, 13).font = _ft(False, "065F46", 9)
-                if _t3_v > 0:
-                    ws.cell(next_row, 14).font = _ft(False, "065F46", 9)
-                # Bold the warning emoji (column 16 in v14.4, was 12 in v14.1)
+                # Bold the warning emoji — now column 14 (was 16 before T2/T3 removal).
                 if _is_approaching:
-                    ws.cell(next_row, 16).font = _ft(True, "92400E", 11)
-                # v15.0: color Trailing column (17) green when locked, Regime
+                    ws.cell(next_row, 14).font = _ft(True, "92400E", 11)
+                # v15.0: color Trailing column (15) green when locked, Regime
                 # column (18) red for HIGH, green for LOW, default for NEUTRAL.
                 if _trailing_price > 0:
-                    ws.cell(next_row, 17).font = _ft(True, "065F46", 9)
+                    ws.cell(next_row, 15).font = _ft(True, "065F46", 9)
                 if _regime == "high":
-                    ws.cell(next_row, 18).font = _ft(True, "991B1B", 9)
+                    ws.cell(next_row, 16).font = _ft(True, "991B1B", 9)
                 elif _regime == "low":
-                    ws.cell(next_row, 18).font = _ft(True, "065F46", 9)
+                    ws.cell(next_row, 16).font = _ft(True, "065F46", 9)
                 next_row += 1
             # End-of-table summary line if any approaching expiry
             if _approaching_count > 0:
