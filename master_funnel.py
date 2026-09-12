@@ -50,6 +50,9 @@ from analysis.intel_fetcher import fetch_latest_intelligence
 # Section 7 & 8: AI & Formatting
 from ai.ai_analyst import get_ai_analysis
 from reporting.report_formatter import ReportFormatter
+from utils.pipeline_logging import configure_pipeline_logging
+from config.thresholds import CONFIG_VERSION
+from pipeline.stages import run_screening
 
 
 def _refresh_resilience_watch(stocks, market_regime, today_iso):
@@ -712,6 +715,12 @@ def _compute_sl_t_v14_6(cmp_price, atr_14, cfv, cap_category, sector,
 
 
 def run_master_pipeline():
+    _run_id = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    _pipeline_logger = configure_pipeline_logging()
+    _pipeline_logger.info(
+        "pipeline_started",
+        extra={"run_id": _run_id, "stage": "pipeline", "status": "started"},
+    )
     cleanup_temp_files()
 
     import sqlite3
@@ -887,6 +896,10 @@ def run_master_pipeline():
     gate_result = gate_check()
 
     if not gate_result["run"]:
+        _pipeline_logger.warning(
+            "pipeline_skipped",
+            extra={"run_id": _run_id, "stage": "gate", "status": "skipped"},
+        )
         from reporting.email_service import send_analysis_email
         print(f"🛑 Pipeline Halted: {gate_result['reason']}")
         try:
@@ -900,6 +913,10 @@ def run_master_pipeline():
     # URL that cloud/GitHub-Actions IPs cannot reach. BSE always runs via
     # the `bse` pip package which handles Akamai auth internally.
     target_date = gate_result["target_date"]   # datetime.date (yesterday)
+    _pipeline_logger.info(
+        "stage_completed",
+        extra={"run_id": _run_id, "stage": "gate", "status": "completed"},
+    )
     print(f"✅ Gate passed. Processing trading day: {target_date}")
 
     try:
@@ -1092,13 +1109,23 @@ def run_master_pipeline():
             print("❌ Consolidation produced empty DataFrame. Aborting.")
             return
 
-        stage1_candidates = stage_1_filter(all_stocks.to_dict("records"))
-        stage2_qualified  = stage_2_fundamental_scorer(pd.DataFrame(stage1_candidates))
-        final_100_df      = get_top_100_candidates(stage2_qualified)
+        screening_result  = run_screening(all_stocks)
+        stage1_candidates = screening_result.stage1
+        stage2_qualified  = screening_result.stage2
+        final_100_df      = screening_result.selected
         final_100_list    = final_100_df.to_dict("records")
 
         print(f"   Universe: {len(all_stocks)} → Stage1: {len(stage1_candidates)} "
               f"→ Stage2: {len(stage2_qualified)} → Stage3: {len(final_100_list)}")
+        _pipeline_logger.info(
+            "screening_completed",
+            extra={
+                "run_id": _run_id,
+                "stage": "screening",
+                "status": "completed",
+                "rows": len(final_100_list),
+            },
+        )
 
         # ─────────────────────────────────────────────────────────────────────
         # SECTION 6: CORE ANALYTICAL ENGINES
@@ -4088,10 +4115,18 @@ def run_master_pipeline():
         conn.close()
 
         print(f"✅ Pipeline Execution Success for {target_date}.")
+        _pipeline_logger.info(
+            "pipeline_completed",
+            extra={"run_id": _run_id, "stage": "pipeline", "status": "completed"},
+        )
 
     except Exception as e:
         import traceback
         print(f"❌ CRITICAL FAILURE: {e}")
+        _pipeline_logger.exception(
+            "pipeline_failed",
+            extra={"run_id": _run_id, "stage": "pipeline", "status": "failed"},
+        )
         traceback.print_exc()
         try:
             from reporting.email_service import send_analysis_email

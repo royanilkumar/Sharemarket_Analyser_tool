@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # v3: use a Personal Access Token so the push authenticates as the
           # repo owner (who IS in the ruleset bypass list). The default

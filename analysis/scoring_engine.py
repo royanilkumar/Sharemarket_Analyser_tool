@@ -1,5 +1,11 @@
 import pandas as pd
 
+from config.thresholds import (
+    AVOID_BELOW as CONFIG_AVOID_BELOW,
+    CAP_THRESHOLDS as CONFIG_CAP_THRESHOLDS,
+    MIN_INFORMED_FOR_BUY as CONFIG_MIN_INFORMED_FOR_BUY,
+)
+
 
 def _nonzero_qoq(val) -> bool:
     """
@@ -37,13 +43,8 @@ class ScoringEngine:
 
     # Cap-tier thresholds: {cap_tier: (BUY_min, WATCHLIST_min)}
     # Any score below WATCHLIST_min → NEUTRAL  (< lowest 15% → AVOID)
-    CAP_THRESHOLDS = {
-        "LARGE": (60, 50),   # Lower bar — large caps are inherently safer
-        "MID":   (63, 53),   # Moderate bar
-        "SMALL": (66, 56),   # Higher bar — more volatility, needs conviction
-        "MICRO": (70, 60),   # Highest bar — only the clearest signals qualify
-    }
-    AVOID_BELOW = 38         # Universal floor — below this = AVOID regardless of cap
+    CAP_THRESHOLDS = CONFIG_CAP_THRESHOLDS
+    AVOID_BELOW = CONFIG_AVOID_BELOW
 
     # v10.17 quality guard: minimum number of "informed" sub-score dimensions
     # required before a stock can carry a BUY verdict. A stock that scores
@@ -52,7 +53,7 @@ class ScoringEngine:
     # missing data to act on. With this guard, such a stock is demoted to
     # WATCHLIST regardless of composite score. Default 3 of 5 dimensions.
     # See ScoringEngine._count_informed_dimensions() for the counting rule.
-    MIN_INFORMED_FOR_BUY = 3
+    MIN_INFORMED_FOR_BUY = CONFIG_MIN_INFORMED_FOR_BUY
 
     def __init__(self):
         pass  # Thresholds defined as class constants above

@@ -1,5 +1,6 @@
 # CLAUDE.md — NSE/BSE Stock Analyser Tool
-## AI Context File · v17.3 · July 2026
+
+## AI Context File · v17.8.1 · September 2026
 
 This file gives Claude (or any AI assistant) complete project context to understand, debug, or extend this codebase without needing additional explanation. **Read it first** before making any change.
 
@@ -27,6 +28,8 @@ The codebase was reorganised in v8 from a flat file layout into proper packages.
 ```
 Sharemarket_Analyser_tool/
 ├── master_funnel.py              ~2,670 lines — Pipeline orchestrator (Sections 0–13)
+├── pipeline/                     Testable stage boundaries (`pipeline.stages`)
+├── config/                       Versioned scoring and risk thresholds
 ├── backfill_history.py           ~1,900 lines — 365-day historical builder
 ├── requirements.txt
 ├── ingestion/
@@ -54,6 +57,7 @@ Sharemarket_Analyser_tool/
 │   └── v7_analysis_engine.py     Sections 3A–3H analytical overlays
 ├── database/
 │   ├── data_bridge.py            ~920 lines — DB consolidation + helpers
+│   ├── migrations.py             Schema-version bookkeeping and migrations
 │   ├── database_manager.py       Connection + schema management
 │   └── db_maintenance.py         400-day rolling circular queue
 ├── ai/
@@ -69,6 +73,8 @@ Sharemarket_Analyser_tool/
 ├── master_prompt/
 │   └── NSE_BSE_Analyser_Master_Prompt_v7_FINAL.txt   System prompt for Gemini
 └── utils/
+    ├── metric_state.py           Explicit available/missing/not-applicable states
+    ├── pipeline_logging.py       Structured JSON lifecycle/stage logging
     ├── bse_diagnosis.py          BSE connectivity debug helper
     └── chat_interface.py         Local REPL for command_parser
 ```
@@ -78,30 +84,31 @@ Sharemarket_Analyser_tool/
 ## 3. DATABASE SCHEMA (SQLite — `market_data.db`, ~400 MB)
 
 Tables are created by two files working together:
+
 - `backfill_history.py::init_all_tables()` — creates the full 15-table set (called once on cold start)
 - `database/data_bridge.py::initialize_v7_tables()` — ensures pipeline-critical tables exist and runs `ALTER TABLE IF NOT EXISTS` migrations for additive schema changes
 - **`master_funnel.py` startup (v10.5)** — defensive `CREATE TABLE IF NOT EXISTS shareholding` + `ALTER TABLE ADD COLUMN` for 18 forensic-input columns, protecting against older DBs created before those columns existed
 
-| Table | Contents | Size |
-|---|---|---|
-| `daily_prices` | OHLCV + delivery % + 52w hi/lo + day chg % | 365d × 5,000 syms |
-| `symbol_master` | Company name, sector, cap category, ISIN, BSE code | ~5,000 symbols |
-| `fundamental_metrics` | PE, PB, EPS, Div Yield, Beta, ROE, D/E, Margins, CAGR + 18 forensic columns (v10.2) | ~5,000 symbols |
-| `shareholding` | Promoter %, FII %, DII %, Pledge % + QoQ changes | ~3,000 symbols |
-| `technical_indicators` | RSI14, MACD, Supertrend, ADX, Stoch K, MFI, OBV, VWAP | ~5,000 symbols |
-| `weekly_momentum` | 2w / 4w / 6w / 8w price change %, beta_90d | ~5,000 symbols |
-| `delivery_stats` | Daily delivery % per symbol | 365 days |
-| `fo_participant_data` | FII + DII + Prop net buy/sell ₹ | Latest 5 rows |
-| `bulk_deals` | Institutional block trades | Rolling window |
-| `insider_trades` | SEBI SAST disclosures | Rolling window |
-| `latest_analysis_results` | Composite score + verdict + AI card per symbol | ~100 symbols |
-| `v7_intelligence` | News + market intel per symbol | ~100 symbols |
-| `run_stats` | One row per pipeline run (gate result, counts, timings) | Append |
-| `watchlist` | Personal watchlist overrides | User-defined |
-| `market_holidays` | NSE holiday calendar (auto-fetched per year, cached) | API + cache |
-| `gold_recommendations` | Append-only log of every Gold-sheet pick + trade levels + expiry | Append |
-| `gold_outcomes` | One row per recommendation; walked forward by `track_outcomes.py`. **Immutable to continuation code** | 1:1 with above |
-| `gold_continuation` | **v17.3** — post-T1 shadow walk (T2/T3 reach, peak, trough, SL break) to each position's own expiry | 1 row per T1_HIT |
+| Table                       | Contents                                                                                                     | Size               |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------ |
+| `daily_prices`            | OHLCV + delivery % + 52w hi/lo + day chg %                                                                   | 365d × 5,000 syms |
+| `symbol_master`           | Company name, sector, cap category, ISIN, BSE code                                                           | ~5,000 symbols     |
+| `fundamental_metrics`     | PE, PB, EPS, Div Yield, Beta, ROE, D/E, Margins, CAGR + 18 forensic columns (v10.2)                          | ~5,000 symbols     |
+| `shareholding`            | Promoter %, FII %, DII %, Pledge % + QoQ changes                                                             | ~3,000 symbols     |
+| `technical_indicators`    | RSI14, MACD, Supertrend, ADX, Stoch K, MFI, OBV, VWAP                                                        | ~5,000 symbols     |
+| `weekly_momentum`         | 2w / 4w / 6w / 8w price change %, beta_90d                                                                   | ~5,000 symbols     |
+| `delivery_stats`          | Daily delivery % per symbol                                                                                  | 365 days           |
+| `fo_participant_data`     | FII + DII + Prop net buy/sell ₹                                                                             | Latest 5 rows      |
+| `bulk_deals`              | Institutional block trades                                                                                   | Rolling window     |
+| `insider_trades`          | SEBI SAST disclosures                                                                                        | Rolling window     |
+| `latest_analysis_results` | Composite score + verdict + AI card per symbol                                                               | ~100 symbols       |
+| `v7_intelligence`         | News + market intel per symbol                                                                               | ~100 symbols       |
+| `run_stats`               | One row per pipeline run (gate result, counts, timings)                                                      | Append             |
+| `watchlist`               | Personal watchlist overrides                                                                                 | User-defined       |
+| `market_holidays`         | NSE holiday calendar (auto-fetched per year, cached)                                                         | API + cache        |
+| `gold_recommendations`    | Append-only log of every Gold-sheet pick + trade levels + expiry                                             | Append             |
+| `gold_outcomes`           | One row per recommendation; walked forward by`track_outcomes.py`. **Immutable to continuation code** | 1:1 with above     |
+| `gold_continuation`       | **v17.3** — post-T1 shadow walk (T2/T3 reach, peak, trough, SL break) to each position's own expiry   | 1 row per T1_HIT   |
 
 **Key DB functions in `database/data_bridge.py`:**
 
@@ -220,6 +227,7 @@ Priority Score = (vol_spike/5 × 25) + (stage2/35 × 30) + (delivery/100 × 20)
 Cap diversification: LARGE ≥ 20, MID ≥ 15, SMALL+MICRO ≤ 65.
 
 Technical alignment bonus (applied in master_funnel after tech loads):
+
 - Supertrend=BUY + MACD=BUY → +8
 - One BUY → +3
 - Both SELL → −5
@@ -285,6 +293,7 @@ MIN_INFORMED_FOR_BUY = 3    # v10.17: of 5 sub-score dimensions
 ### Ghost keys (derived before storm/sentiment scoring)
 
 Populated in `master_funnel.py` just before the composite-score call:
+
 - `fcf_positive_4q` ← `fcf > 0`
 - `promoter_q_increase` ← `promoter_qoq > 0.3`
 - `fii_buy_3q` ← `fii_qoq > 0.3`
@@ -298,15 +307,15 @@ Populated in `master_funnel.py` just before the composite-score call:
 
 7 models, weighted and normalised to active (non-zero) models only:
 
-| Model | Weight | Formula | Condition |
-|---|---|---|---|
-| M1 DCF | 30% | EPS × (1+g)^n / r | Positive EPS |
-| M2 Graham | 15% | √(22.5 × EPS × BVPS) | EPS > 0, BVPS > 0 |
-| M3 PE | 20% | EPS × sector_median_PE | Sector PE map |
-| M4 PB | 15% | BVPS × sector_median_PB | PB available |
-| M5 EV/EBITDA | 10% | CMP × (sector_EV_mult / EV_EBITDA) | EV/EBITDA available |
-| M6 DDM | 5% | D1 / (r−g), growth capped 6% | Div yield 0.1 %–15 % ONLY |
-| M7 PEG | 5% | EPS × min(growth, 30%) | Growth available |
+| Model        | Weight | Formula                             | Condition                  |
+| ------------ | ------ | ----------------------------------- | -------------------------- |
+| M1 DCF       | 30%    | EPS × (1+g)^n / r                  | Positive EPS               |
+| M2 Graham    | 15%    | √(22.5 × EPS × BVPS)             | EPS > 0, BVPS > 0          |
+| M3 PE        | 20%    | EPS × sector_median_PE             | Sector PE map              |
+| M4 PB        | 15%    | BVPS × sector_median_PB            | PB available               |
+| M5 EV/EBITDA | 10%    | CMP × (sector_EV_mult / EV_EBITDA) | EV/EBITDA available        |
+| M6 DDM       | 5%     | D1 / (r−g), growth capped 6%       | Div yield 0.1 %–15 % ONLY |
+| M7 PEG       | 5%     | EPS × min(growth, 30%)             | Growth available           |
 
 **MoS** = (CFV − CMP) / CMP × 100
 
@@ -326,6 +335,7 @@ Populated in `master_funnel.py` just before the composite-score call:
 ### Key method: `ForensicsEngine.fetch_forensic_inputs(symbol)` (v10.4)
 
 Pulls live from yfinance for ONE symbol and returns a dict:
+
 - From `ticker.balance_sheet`: `total_assets_cr`, `total_liab_cr`, `retained_earnings_cr`, `working_cap_cr`, `curr_assets_cr`, `curr_liab_cr`, `total_debt_cr`, `cash_cr`, `inventory_days`, `receivable_days`, `payable_days`
 - From `ticker.cashflow`: `capex_cr`, `operating_cf_cr`
 - From `ticker.income_stmt`: `ebit_cr`, `int_expense_cr`, `q_rev_cr`, `q_ebitda_cr`, `q_pat_cr`
@@ -336,16 +346,16 @@ Called inline by `master_funnel.py` for each of the top-100 stocks before `calcu
 
 Returns a dict merged onto the stock dict. All fields return `"—"` when inputs are missing (not 0 or 1.0):
 
-| Output key | Excel column | Formula |
-|---|---|---|
-| `ccc_days` | CCC Days | inventory_days + receivable_days − payable_days |
-| `nd_ebitda` | ND/EBITDA | (total_debt − cash) / ebitda_annual |
-| `int_coverage` | Int Coverage | ebit / int_expense |
-| `capex_rev` | Capex / Rev % | (capex / rev_annual) × 100 |
-| `earnings_quality` | Earn Quality | cfo / pat |
-| `altman_z` | Altman Z | 1.2·x1 + 1.4·x2 + 3.3·x3 + 0.6·x4 + 1.0·x5 |
-| `beneish_m` | Beneish M | Accrual-quality proxy (TATA-based tiers) |
-| `pledge_direction` | Pledge Direction | Passthrough from master_funnel |
+| Output key           | Excel column     | Formula                                          |
+| -------------------- | ---------------- | ------------------------------------------------ |
+| `ccc_days`         | CCC Days         | inventory_days + receivable_days − payable_days |
+| `nd_ebitda`        | ND/EBITDA        | (total_debt − cash) / ebitda_annual             |
+| `int_coverage`     | Int Coverage     | ebit / int_expense                               |
+| `capex_rev`        | Capex / Rev %    | (capex / rev_annual) × 100                      |
+| `earnings_quality` | Earn Quality     | cfo / pat                                        |
+| `altman_z`         | Altman Z         | 1.2·x1 + 1.4·x2 + 3.3·x3 + 0.6·x4 + 1.0·x5  |
+| `beneish_m`        | Beneish M        | Accrual-quality proxy (TATA-based tiers)         |
+| `pledge_direction` | Pledge Direction | Passthrough from master_funnel                   |
 
 ### Important v10.6 annualization fix (ND/EBITDA)
 
@@ -396,6 +406,7 @@ Before rendering row-4 headers, walks the top-100 stocks and counts non-`"—"`,
 ### Tooltip system (Session 16)
 
 `reporting/tooltip_formatter.py` (~980 lines). Three public helpers used by `excel_generator.py`:
+
 - `apply_tooltips(ws, row, col_map)` — per-cell hover + ⓘ indicator
 - `apply_group_tooltips(ws, row, group_cols)` — group-header tooltips
 - `build_reference_sheet(wb)` — populates the Tooltip Reference sheet
@@ -407,6 +418,7 @@ Before rendering row-4 headers, walks the top-100 stocks and counts non-`"—"`,
 Auto-runs when `daily_prices` has fewer than 50,000 rows (fresh DB).
 
 **Tables populated:**
+
 - `daily_prices` — 365 days of OHLCV per symbol
 - `symbol_master` — company names, sectors, cap categories
 - `technical_indicators` — all indicators per symbol (latest date)
@@ -480,6 +492,7 @@ Old formula had `c > st_up = BUY` which was inverted → always NEUTRAL. Fixed.
 ### Gate check — `ingestion/orchestrator.py::gate_check`
 
 Six conditions:
+
 - **C1** Weekday (Mon–Fri)
 - **C2** Not an NSE holiday (auto-fetched from NSE API + cached in `market_holidays`; fail-closed if calendar unknown — see `holiday_calendar.py`)
 - **C3** NSE bhav copy URL available (HEAD request)
@@ -640,6 +653,15 @@ AVOID_SKIP_AI            = True      # v10.13 FIX #1 — AVOID verdict → place
 
 ---
 
+## 15.1 CURRENT ENGINEERING RELEASE — v17.8.1
+
+- The consolidated regression suite is cross-platform and currently passes `91/91` under the repository virtual environment.
+- Screening is exposed through `pipeline.stages.run_screening()` and returns a typed `ScreeningResult` without changing the existing screening algorithms.
+- Scoring thresholds are versioned in `config/thresholds.py`; SQLite schema bookkeeping is centralized in `database/migrations.py`.
+- `utils/pipeline_logging.py` emits JSON lifecycle events to `pipeline.log` for gate, screening, success, and failure diagnostics.
+- Survivorship checks prefer the latest NSE-traded universe rather than treating top-100 ranking churn as delisting.
+- `requirements-lock.txt` and `.github/workflows/tests.yml` define reproducible dependency and regression validation paths.
+
 ## 15. VERSION HISTORY
 
 ### v17.3 — Continuation tracking (Option C, expiry-anchored) · July 2026
@@ -649,6 +671,7 @@ AVOID_SKIP_AI            = True      # v10.13 FIX #1 — AVOID verdict → place
 **The fix.** A new `gold_continuation` table records a SHADOW WALK from `t1_hit_date + 1` to the position's **own** `expiry_date`. Expiry-anchored, not a flat 30 days: BLISSGVS hit T1 on day 5 of 90 and keeps its full 85-day runway, while WABAG hit T1 on day 24 of 30 and gets 6. A fixed window would truncate the first and fabricate 24 days for the second. Total previously-unmeasured runway across the 13 T1 hits: **533 days**, median 37, range 6–85.
 
 **Design notes.**
+
 - Seeding runs BEFORE the walk and LEFT JOINs `gold_outcomes` against `gold_continuation`, so the 13 existing T1 hits auto-backfill on first run — no manual migration, which matters because `market_data.db` is a 641 MB Actions artifact that can never be committed or hand-edited.
 - Column mapping: `gold_outcomes` has no `t1_hit_*` columns. For a `T1_HIT` row, `outcome_date` → `t1_hit_date` and `outcome_price` → `t1_hit_price`.
 - `expiry_date` defaults to `''` (empty string, not NULL) on legacy rows. Fallback chain: `expiry_date` → `recommendation_date + expiry_days` → skip and log. Never guess.
@@ -967,17 +990,17 @@ Zero DB schema change, zero analytical behaviour change for real-valuation stock
 
 ## 16. KNOWN LIMITATIONS
 
-| Column | Limitation | Status |
-|---|---|---|
-| Current Ratio / Quick Ratio | yfinance missing for ~25–40% of Indian stocks | 2nd-pass balance_sheet; ~60–75% coverage |
-| Piotroski F-Score | No free source for true 9-point YoY comparisons | Proxy from available data |
-| PAT CAGR 3Y / Rev CAGR 3Y | Not in yfinance for Indian stocks | Red headers (no free source) |
-| Alert Log Prev Score | Blank on first run | Populates from run 2 onwards |
-| Pledge % | Only in BSE corporate filings | Always 0 until paid source added |
-| DII % | NSE API may be blocked on cloud IPs | Real values when API responds, 0 otherwise (v10.6) |
-| QoQ deltas (Pro/FII/DII) | Need ≥ 90 days of `shareholding` history | Show `"—"` until accumulation (~3 months) |
-| BSE SME delivery % | Not available from BSE API | NSE delivery used as primary |
-| BSE downloads from cloud | Akamai blocks cloud IPs | Handled via `bse` pip pkg + allowlist fallback |
+| Column                      | Limitation                                      | Status                                             |
+| --------------------------- | ----------------------------------------------- | -------------------------------------------------- |
+| Current Ratio / Quick Ratio | yfinance missing for ~25–40% of Indian stocks  | 2nd-pass balance_sheet; ~60–75% coverage          |
+| Piotroski F-Score           | No free source for true 9-point YoY comparisons | Proxy from available data                          |
+| PAT CAGR 3Y / Rev CAGR 3Y   | Not in yfinance for Indian stocks               | Red headers (no free source)                       |
+| Alert Log Prev Score        | Blank on first run                              | Populates from run 2 onwards                       |
+| Pledge %                    | Only in BSE corporate filings                   | Always 0 until paid source added                   |
+| DII %                       | NSE API may be blocked on cloud IPs             | Real values when API responds, 0 otherwise (v10.6) |
+| QoQ deltas (Pro/FII/DII)    | Need ≥ 90 days of`shareholding` history      | Show`"—"` until accumulation (~3 months)        |
+| BSE SME delivery %          | Not available from BSE API                      | NSE delivery used as primary                       |
+| BSE downloads from cloud    | Akamai blocks cloud IPs                         | Handled via`bse` pip pkg + allowlist fallback    |
 
 ---
 
@@ -986,21 +1009,25 @@ Zero DB schema change, zero analytical behaviour change for real-valuation stock
 ### After deploying v10.5+
 
 Verify schema is correct:
+
 ```powershell
 python -c "import sqlite3; c=sqlite3.connect('market_data.db'); print(c.execute('SELECT COUNT(*),MIN(date),MAX(date) FROM shareholding').fetchone())"
 ```
 
 Verify forensic columns exist in `fundamental_metrics`:
+
 ```powershell
 python -c "import sqlite3; c=sqlite3.connect('market_data.db'); print([r[1] for r in c.execute('PRAGMA table_info(fundamental_metrics)').fetchall() if r[1].endswith('_cr') or r[1].endswith('_days')])"
 ```
 
 Test yfinance balance sheet for Indian tickers:
+
 ```powershell
 python -c "import yfinance as yf; t=yf.Ticker('RELIANCE.NS'); print('BS rows:', list(t.balance_sheet.index)[:5] if not t.balance_sheet.empty else 'EMPTY')"
 ```
 
 Check if forensics engine has the inline fetcher:
+
 ```powershell
 python -c "from analysis.forensics_engine import ForensicsEngine; print('OK' if callable(ForensicsEngine.fetch_forensic_inputs) else 'MISSING')"
 ```
@@ -1008,62 +1035,65 @@ python -c "from analysis.forensics_engine import ForensicsEngine; print('OK' if 
 ### After deploying v10.6
 
 Verify DII enrichment in DB:
+
 ```powershell
 python -c "import sqlite3; c=sqlite3.connect('market_data.db'); print(c.execute('SELECT symbol, fii_pct, dii_pct FROM shareholding WHERE dii_pct > 0 LIMIT 10').fetchall())"
 ```
 
 Console should show during pipeline run:
+
 ```
 NSE shareholding: enriched DII for N/M symbols
 ```
+
 If N is 0, NSE API is being blocked (common on GitHub Actions, typically works on local Windows).
 
 ### Expected field population rates
 
-| Column | Typical (large-cap) | Typical (mid-cap) | Typical (small/micro) |
-|---|---|---|---|
-| ND/EBITDA | 70-85% | 50-70% | 20-40% |
-| Int Coverage | 40-70% | 30-50% | 15-30% |
-| CCC Days | 40-70% | 30-50% | 15-30% |
-| Altman Z | 50-80% | 40-60% | 20-40% |
-| Beneish M | 50-80% | 40-60% | 20-40% |
-| DII % | 60-90% (if NSE works) | 50-80% | 30-60% |
-| QoQ deltas | 0% initially, ~80% after 90 days | 0% → ~70% | 0% → ~50% |
+| Column       | Typical (large-cap)              | Typical (mid-cap) | Typical (small/micro) |
+| ------------ | -------------------------------- | ----------------- | --------------------- |
+| ND/EBITDA    | 70-85%                           | 50-70%            | 20-40%                |
+| Int Coverage | 40-70%                           | 30-50%            | 15-30%                |
+| CCC Days     | 40-70%                           | 30-50%            | 15-30%                |
+| Altman Z     | 50-80%                           | 40-60%            | 20-40%                |
+| Beneish M    | 50-80%                           | 40-60%            | 20-40%                |
+| DII %        | 60-90% (if NSE works)            | 50-80%            | 30-60%                |
+| QoQ deltas   | 0% initially, ~80% after 90 days | 0% → ~70%        | 0% → ~50%            |
 
 ---
 
 ## 18. QUICK REFERENCE — KEY FUNCTION LOCATIONS
 
-| Function / Block | File | Notes |
-|---|---|---|
-| Gate check (6 conditions) | `ingestion/orchestrator.py` | `gate_check()` |
-| NSE holiday calendar | `ingestion/holiday_calendar.py` | `ensure_holiday_calendar_fresh()` — API + DB cache |
-| NSE downloaders | `ingestion/harvester.py` | `download_nse_bhavcopy` etc. |
-| BSE singleton client | `master_funnel.py` | `_get_bse_client`, `_close_bse_client` |
-| Reconciler + dual-listed fallback | `ingestion/reconciler.py` | `DUAL_LISTED_ALLOWLIST` |
-| Stage 1 filter | `screening/pre_screener.py` | `stage_1_filter` |
-| Stage 2 quality | `screening/pre_screener.py` | `stage_2_fundamental_scorer` |
-| Stage 3 ranker | `screening/priority_ranker.py` | `get_top_100_candidates` |
-| Defensive schema init (v10.5) | `master_funnel.py` | startup block ~line 251 |
-| Inline forensic fetch (v10.4) | `master_funnel.py` | in top-100 loop ~line 600 |
-| QoQ `"—"` fix (v10.4) | `master_funnel.py` | `_qoq()` helper ~line 530 |
-| Forensic re-run (v10.3) | `master_funnel.py` | Section 5A.5 ~line 1450 |
-| Forensic inline fetcher | `analysis/forensics_engine.py` | `fetch_forensic_inputs(symbol)` |
-| ND/EBITDA annualization (v10.6) | `analysis/forensics_engine.py` | ~line 340 |
-| Pledge default `"—"` (v10.6) | `analysis/forensics_engine.py` | ~line 397 |
-| NSE DII enrichment (v10.6) | `backfill_history.py` | after yfinance pass ~line 1800 |
-| NSE corp-info API | `backfill_history.py` | `_nse_shareholding()` |
-| Composite score + verdict | `analysis/scoring_engine.py` | `calculate_composite_score` |
-| DCF guards | `analysis/fair_value_engine.py` | Session 19 |
-| Piotroski F-Score | `analysis/fundamental_engine.py` | `calculate_piotroski_f_score` |
-| Altman Z / Beneish M | `analysis/forensics_engine.py` | `calculate_altman_z` / `calculate_beneish_m` |
-| Excel generator (7 sheets) | `reporting/excel_generator.py` | `class ExcelGeneratorV6` |
-| Dynamic red-header (v10.4) | `reporting/excel_generator.py` | ~line 1183 |
-| Alert Log | `reporting/excel_generator.py` | `_alert_log()` |
-| AI investor cards | `ai/ai_analyst.py` | `get_ai_analysis` (Gemini) |
-| Email delivery | `reporting/email_service.py` | `send_analysis_email` |
-| Historical QoQ lookup (v10.3) | `database/data_bridge.py` | `get_historical_quarter_data` |
-| 400-day rolling window | `database/db_maintenance.py` | `enforce_circular_queue` (KEEP_DAYS=400) |
+| Function / Block                  | File                               | Notes                                                 |
+| --------------------------------- | ---------------------------------- | ----------------------------------------------------- |
+| Gate check (6 conditions)         | `ingestion/orchestrator.py`      | `gate_check()`                                      |
+| NSE holiday calendar              | `ingestion/holiday_calendar.py`  | `ensure_holiday_calendar_fresh()` — API + DB cache |
+| NSE downloaders                   | `ingestion/harvester.py`         | `download_nse_bhavcopy` etc.                        |
+| BSE singleton client              | `master_funnel.py`               | `_get_bse_client`, `_close_bse_client`            |
+| Reconciler + dual-listed fallback | `ingestion/reconciler.py`        | `DUAL_LISTED_ALLOWLIST`                             |
+| Stage 1 filter                    | `screening/pre_screener.py`      | `stage_1_filter`                                    |
+| Stage 2 quality                   | `screening/pre_screener.py`      | `stage_2_fundamental_scorer`                        |
+| Stage 3 ranker                    | `screening/priority_ranker.py`   | `get_top_100_candidates`                            |
+| Defensive schema init (v10.5)     | `master_funnel.py`               | startup block ~line 251                               |
+| Inline forensic fetch (v10.4)     | `master_funnel.py`               | in top-100 loop ~line 600                             |
+| QoQ`"—"` fix (v10.4)           | `master_funnel.py`               | `_qoq()` helper ~line 530                           |
+| Forensic re-run (v10.3)           | `master_funnel.py`               | Section 5A.5 ~line 1450                               |
+| Forensic inline fetcher           | `analysis/forensics_engine.py`   | `fetch_forensic_inputs(symbol)`                     |
+| ND/EBITDA annualization (v10.6)   | `analysis/forensics_engine.py`   | ~line 340                                             |
+| Pledge default`"—"` (v10.6)    | `analysis/forensics_engine.py`   | ~line 397                                             |
+| NSE DII enrichment (v10.6)        | `backfill_history.py`            | after yfinance pass ~line 1800                        |
+| NSE corp-info API                 | `backfill_history.py`            | `_nse_shareholding()`                               |
+| Composite score + verdict         | `analysis/scoring_engine.py`     | `calculate_composite_score`                         |
+| DCF guards                        | `analysis/fair_value_engine.py`  | Session 19                                            |
+| Piotroski F-Score                 | `analysis/fundamental_engine.py` | `calculate_piotroski_f_score`                       |
+| Altman Z / Beneish M              | `analysis/forensics_engine.py`   | `calculate_altman_z` / `calculate_beneish_m`      |
+| Excel generator (7 sheets)        | `reporting/excel_generator.py`   | `class ExcelGeneratorV6`                            |
+| Dynamic red-header (v10.4)        | `reporting/excel_generator.py`   | ~line 1183                                            |
+| Alert Log                         | `reporting/excel_generator.py`   | `_alert_log()`                                      |
+| AI investor cards                 | `ai/ai_analyst.py`               | `get_ai_analysis` (Gemini)                          |
+| Email delivery                    | `reporting/email_service.py`     | `send_analysis_email`                               |
+| Historical QoQ lookup (v10.3)     | `database/data_bridge.py`        | `get_historical_quarter_data`                       |
+| 400-day rolling window            | `database/db_maintenance.py`     | `enforce_circular_queue` (KEEP_DAYS=400)            |
 
 ---
 
@@ -1095,7 +1125,7 @@ If N is 0, NSE API is being blocked (common on GitHub Actions, typically works o
 - [ ] Reduce AI batch size 12 → 8 if response truncation observed
 - [ ] FCF-yield based FV model (M8) for capital-light businesses
 - [ ] PAT CAGR in fundamental score (needs data source)
-- [x] Verify ETFs = 0 in output after pipeline run *(v12.0: BSE 3-tier cascade restores sc_group filter so ETFs stop leaking)*
+- [X] Verify ETFs = 0 in output after pipeline run *(v12.0: BSE 3-tier cascade restores sc_group filter so ETFs stop leaking)*
 - [ ] Expand DUAL_LISTED_ALLOWLIST as new IPOs confirm dual-listing *(v11.0.2 added runtime auto-add via `dual_listed_runtime` table)*
 - [ ] Investigate BSE corporate filings API for Pledge % and separate DII (paid)
 
@@ -1109,6 +1139,7 @@ If N is 0, NSE API is being blocked (common on GitHub Actions, typically works o
 ### Two root-cause fixes that resolve four observable symptoms
 
 **Symptom set:**
+
 - Dashboard had 79 stocks instead of 100 (~21 missing on every quota-exhausted run)
 - Exchange tag column was 98% `DUAL_LISTED` with zero `BSE_ONLY` / `BSE_SME` entries
 - Index/ETF tickers (`IT`, `PSUBANK`, `BANKNIFTY1`, `MON100`, `HDFCNIFBAN`) leaked into the analysis pool
@@ -1200,14 +1231,14 @@ A code review of `analysis/fair_value_engine.py` flagged 7 issues across the 7 v
 
 ### v12.2 initial release — code-review-driven fixes
 
-| Fix | Model | Before | After |
-|-----|-------|--------|-------|
-| **eps/bvps sanitisation** | M1, M2, M3, M7 | `data.get('eps', 0)` raw — crashed on `'—'` / `'N/A'` / `None` | Now routes through `_sf()` like every other field |
-| **Sector substring matching** | M3, M4, M5 | `sector.split()[0]` only matched first word — "Information Technology" got default 25 | Two-pass: SECTOR_ALIASES canonicalisation, then case-insensitive substring scan |
-| **Sector map expansion** | M3, M4, M5 | Missing Realty, Telecom, Cement, Textiles, Media, Insurance, NBFC, Defence | All explicitly mapped |
-| **DDM growth derivation** | M6 | `min(max(_pat_g / 200, 0.02), 0.06)` — 2% floor inflated FV for declining-earnings stocks | `max(min(_pat_g / 100 / 2, 0.06), 0.0)` — 0% floor, units explicit |
-| **PEG unit guard** | M7 | `EPS × growth_3yr` no guard — would silently 100×-misprice if growth arrived as decimal (0.15 vs 15) | Skip if `growth < 1.0` (likely unit error) |
-| **Composite unknown-key default** | composite | `base_weights.get(k, 0.10)` silently weighted unknown keys | `k in base_weights` filter; unknown keys excluded from total weight |
+| Fix                                     | Model          | Before                                                                                                    | After                                                                           |
+| --------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **eps/bvps sanitisation**         | M1, M2, M3, M7 | `data.get('eps', 0)` raw — crashed on `'—'` / `'N/A'` / `None`                                  | Now routes through`_sf()` like every other field                              |
+| **Sector substring matching**     | M3, M4, M5     | `sector.split()[0]` only matched first word — "Information Technology" got default 25                  | Two-pass: SECTOR_ALIASES canonicalisation, then case-insensitive substring scan |
+| **Sector map expansion**          | M3, M4, M5     | Missing Realty, Telecom, Cement, Textiles, Media, Insurance, NBFC, Defence                                | All explicitly mapped                                                           |
+| **DDM growth derivation**         | M6             | `min(max(_pat_g / 200, 0.02), 0.06)` — 2% floor inflated FV for declining-earnings stocks              | `max(min(_pat_g / 100 / 2, 0.06), 0.0)` — 0% floor, units explicit           |
+| **PEG unit guard**                | M7             | `EPS × growth_3yr` no guard — would silently 100×-misprice if growth arrived as decimal (0.15 vs 15) | Skip if`growth < 1.0` (likely unit error)                                     |
+| **Composite unknown-key default** | composite      | `base_weights.get(k, 0.10)` silently weighted unknown keys                                              | `k in base_weights` filter; unknown keys excluded from total weight           |
 
 ### v12.2 Round 1 — production-data-driven follow-on
 
@@ -1220,6 +1251,7 @@ A diff of two real Excel dashboards (`NSE_BSE_Full_Dashboard_20260428_before_fix
 #### Round 1 changes
 
 1. **`SECTOR_ALIASES` dict** in `analysis/fair_value_engine.py` — explicit map for production sector strings to canonical benchmark keys:
+
    - `Basic Materials → Metals` (PE 12, PB 1.5, EV 6)
    - `Industrials → Infra` (PE 22, PB 2.5, EV 11)
    - `Communication Services → Telecom` (PE 22, PB 2.5, EV 9)
@@ -1228,9 +1260,7 @@ A diff of two real Excel dashboards (`NSE_BSE_Full_Dashboard_20260428_before_fix
    - `Real Estate → Realty` (PE 25, PB 2.5, EV 12)
    - `General` left as catch-all → falls to default 25/3.0/15 (intentional — no sector signal)
    - Plus 12 industry-specific aliases for legacy data sources (Iron & Steel, Banks - Public Sector, Information Technology, etc.)
-
 2. **`_canonicalize_sector()` helper** — case-insensitive lookup that whitespace-strips and applies SECTOR_ALIASES. Falls through to substring matcher if no alias hits.
-
 3. **`_sector_resolutions` diagnostic field** — every `calculate_all_models()` call now returns a `'_sector_resolutions'` key in the models dict containing `{'M3_PE': 'Metals', 'M4_PB': 'Metals', 'M5_EV': 'Metals'}` style mapping. Underscore prefix signals "metadata, not model output." Composite weighter (`get_composite_fair_value`) filters via `k in base_weights` so the metadata is correctly excluded from FV math.
 
 ### What was tested
@@ -1252,9 +1282,7 @@ A diff of two real Excel dashboards (`NSE_BSE_Full_Dashboard_20260428_before_fix
 These were identified in the code review but **deliberately not fixed** in this release because they require either data-pipeline changes or design decisions:
 
 1. **M5 EV/EBITDA shortcut formula** — uses `CMP × sector_ev_mult / current_ev_ebitda`, which assumes net debt and share count remain stable vs peers. A proper EV-based fair value would compute `(EBITDA × sector_ev_mult − net_debt) / shares_outstanding`, requiring three new data fields. The 10% composite weight bounds the impact. Real-data audit confirmed M5 is producing aggressive Tech-sector upside (TCS at 80% upside), but outputs are dimensionally plausible (66 of 72 stocks land in [0.3×, 3×] CMP range). Round 2 candidate.
-
 2. **M7 "PEG" model** — implements `EPS × growth_pct`, mathematically equivalent to assuming PEG = 1.0 (Lynch's rule) but doesn't expose the constant explicitly. Real-data audit showed 0 stocks had this fire the unit guard, so production data is clean. Round 2 candidate to make `PEG_BENCHMARK = 1.0` explicit.
-
 3. **MoS distribution shift** — mean MoS moved from +4.7% to +10.8% across 89 stocks. This is the engine becoming more correctly bullish (it can now see real undervaluations that were masked by default multipliers); not a bug. May warrant re-tuning the score adjustment thresholds (`+12 at MoS>40`, etc.) if backtests calibrated against the old distribution.
 
 ### LESSON — Audit production data before declaring fixes complete
@@ -1316,6 +1344,7 @@ The elegant part: Tier 1 doesn't need `shares_outstanding` (which the pipeline d
 Tier 1 also has a **4× CMP cap** mirroring M1 DCF's cap, plus a **negative-equity branch**: if `fair_mcap_cr` is negative (debt exceeds fair EV), emit `CMP × 0.3` (70% discount) rather than skipping — this preserves the bearish signal for severely overlevered stocks.
 
 The new `_m5_method` field in `_sector_resolutions` surfaces which tier fired:
+
 - `"proper"` — Tier 1 succeeded
 - `"proper_negative_equity"` — Tier 1, but fair_mcap_cr < 0
 - `"shortcut"` — Tier 2 fallback
@@ -1344,14 +1373,15 @@ Mathematically identical to v12.2 outputs (since 1.0 × X = X), but the constant
 
 Re-ran Round 2 engine against the production Excel (100 stocks):
 
-| Tier | Count | Notes |
-|------|-------|-------|
-| `proper` (Tier 1) | 0 in simulation* | *Simulation lacks `mcap_cr`; real pipeline has it, expect ~75 stocks |
-| `shortcut` (Tier 2) | 81 | Fallback when proper inputs missing |
-| `skip_financial` (Tier 3) | 13 | Banks/NBFCs/Insurance — correctly removes M5 noise |
-| `skip_no_data` (Tier 3) | 6 | No EV/EBITDA in feed |
+| Tier                        | Count            | Notes                                                                 |
+| --------------------------- | ---------------- | --------------------------------------------------------------------- |
+| `proper` (Tier 1)         | 0 in simulation* | *Simulation lacks`mcap_cr`; real pipeline has it, expect ~75 stocks |
+| `shortcut` (Tier 2)       | 81               | Fallback when proper inputs missing                                   |
+| `skip_financial` (Tier 3) | 13               | Banks/NBFCs/Insurance — correctly removes M5 noise                   |
+| `skip_no_data` (Tier 3)   | 6                | No EV/EBITDA in feed                                                  |
 
 3 stocks shifted M5 to 0 due to financial-sector skip:
+
 - **BAJAJHLDNG**: was M5=994 (CMP 10246) — was severely dragging composite down
 - **AUSOMENT, BAJAJFINSV**: same pattern
 
@@ -1359,13 +1389,14 @@ For all 3, removing the bad M5 signal shifted MoS upward (more accurate, since E
 
 ### HINDALCO walkthrough — full Round 1 + Round 2 progression
 
-| Release | Sector resolved to | M3 PE | M4 PB | M5 EV | CFV | MoS | Verdict |
-|---------|-------------------|-------|-------|-------|-----|-----|---------|
-| Pre-v12.2 | (default 25/3.0/15) | ₹1807 | ₹1878 | ₹1937 | ₹1409 | +31% | **BUY** ❌ |
-| Round 1 (v12.2) | Metals (12/1.5/6) | ₹867 | ₹939 | ₹775 | ₹964 | -10% | OVERVALUED |
-| Round 2 (v12.3) | Metals + proper M5 | ₹867 | ₹939 | **₹508** | ₹740 | -31% | NEUTRAL |
+| Release         | Sector resolved to  | M3 PE  | M4 PB  | M5 EV           | CFV    | MoS  | Verdict          |
+| --------------- | ------------------- | ------ | ------ | --------------- | ------ | ---- | ---------------- |
+| Pre-v12.2       | (default 25/3.0/15) | ₹1807 | ₹1878 | ₹1937          | ₹1409 | +31% | **BUY** ❌ |
+| Round 1 (v12.2) | Metals (12/1.5/6)   | ₹867  | ₹939  | ₹775           | ₹964  | -10% | OVERVALUED       |
+| Round 2 (v12.3) | Metals + proper M5  | ₹867  | ₹939  | **₹508** | ₹740  | -31% | NEUTRAL          |
 
 The progression shows each release tightening the assessment for a real metals stock with `Beta 0.24, PE 14.4, ₹50,000 Cr debt`:
+
 1. Pre-v12.2 said BUY because comparing against generic 25× PE made it look cheap
 2. Round 1 used Metals sector multipliers correctly → OVERVALUED
 3. Round 2 also accounts for ₹50,000 Cr of debt → NEUTRAL/Significantly Overvalued
@@ -1478,17 +1509,17 @@ stock["nm_num"] = round(_nm_raw * 100, 2) if 0 < abs(_nm_raw) < 2.0 else round(_
 
 yfinance occasionally returns absurd values for thin-revenue or one-time-gain rows. Six stocks in the prior run had impossible NPM and three had ROA outside plausible bounds:
 
-| Stock      | NPM     | ROA     |
-|------------|---------|---------|
-| DGCONTENT  | 126.4   | —       |
-| AMAGI      | 189.1   | —       |
-| MEGASTAR   | 164.8   | —       |
-| REDINGTON  | 156.8   | —       |
-| RELIGARE   | 127.6   | —       |
-| GCSL       | −144.5  | —       |
-| M&MFIN     | —       | 189     |
-| TATACAP    | —       | 181.5   |
-| J&KBANK    | —       | 126.4   |
+| Stock     | NPM     | ROA   |
+| --------- | ------- | ----- |
+| DGCONTENT | 126.4   | —    |
+| AMAGI     | 189.1   | —    |
+| MEGASTAR  | 164.8   | —    |
+| REDINGTON | 156.8   | —    |
+| RELIGARE  | 127.6   | —    |
+| GCSL      | −144.5 | —    |
+| M&MFIN    | —      | 189   |
+| TATACAP   | —      | 181.5 |
+| J&KBANK   | —      | 126.4 |
 
 These then fed into `nm_num` and `roe_num` and inflated the composite score downstream.
 
@@ -1519,18 +1550,18 @@ ROA gets an inline clamp at line ~1422 (since `_clamp_pct` is defined further do
 
 Switching the AI provider from Anthropic Claude to Google Gemini happened in v10.1 — but the user-facing strings never followed:
 
-| File | Line(s) | Before | After |
-|------|---------|--------|-------|
-| `reporting/excel_generator.py` | 793 | "Requires Anthropic API credits — populated by AI analyst." | "Requires Gemini API credits — populated by AI analyst (aistudio.google.com)." |
-| `reporting/excel_generator.py` | 797, 801, 805 | "Requires Anthropic API credits." | "Requires Gemini API credits." |
-| `reporting/excel_generator.py` | 939 | "AI-generated text fields (needs Anthropic credits…)" | "AI-generated text fields (needs Gemini credits…)" |
-| `reporting/excel_generator.py` | 944 | "# Needs Anthropic API credits" | "# Needs Gemini API credits" |
-| `reporting/excel_generator.py` | 1095 | "Claude AI investor narrative" | "Gemini AI investor narrative" |
-| `reporting/excel_generator.py` | 1456 | banner: "AMBER header = Needs Anthropic API credits" | "AMBER header = Needs Gemini API credits" |
-| `reporting/excel_generator.py` | 1507 | "# Amber — populated only when Anthropic API credits are loaded" | "# Amber — populated only when Gemini API credits are loaded" |
-| `reporting/tooltip_formatter.py` | 700 | "Claude AI investor narrative (150–250 words)" | "Gemini AI investor narrative (150–250 words)" |
-| `reporting/tooltip_formatter.py` | 875 | "150–250-word narrative from Claude AI…" | "150–250-word narrative from Gemini AI…" |
-| `master_prompt/NSE_BSE_Analyser_Master_Prompt_v7_FINAL.txt` | 1626, 1628, 1772, 1777, 1796, 1802 | Claude / Anthropic | Gemini |
+| File                                                          | Line(s)                            | Before                                                            | After                                                                           |
+| ------------------------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `reporting/excel_generator.py`                              | 793                                | "Requires Anthropic API credits — populated by AI analyst."      | "Requires Gemini API credits — populated by AI analyst (aistudio.google.com)." |
+| `reporting/excel_generator.py`                              | 797, 801, 805                      | "Requires Anthropic API credits."                                 | "Requires Gemini API credits."                                                  |
+| `reporting/excel_generator.py`                              | 939                                | "AI-generated text fields (needs Anthropic credits…)"            | "AI-generated text fields (needs Gemini credits…)"                             |
+| `reporting/excel_generator.py`                              | 944                                | "# Needs Anthropic API credits"                                   | "# Needs Gemini API credits"                                                    |
+| `reporting/excel_generator.py`                              | 1095                               | "Claude AI investor narrative"                                    | "Gemini AI investor narrative"                                                  |
+| `reporting/excel_generator.py`                              | 1456                               | banner: "AMBER header = Needs Anthropic API credits"              | "AMBER header = Needs Gemini API credits"                                       |
+| `reporting/excel_generator.py`                              | 1507                               | "# Amber — populated only when Anthropic API credits are loaded" | "# Amber — populated only when Gemini API credits are loaded"                  |
+| `reporting/tooltip_formatter.py`                            | 700                                | "Claude AI investor narrative (150–250 words)"                   | "Gemini AI investor narrative (150–250 words)"                                 |
+| `reporting/tooltip_formatter.py`                            | 875                                | "150–250-word narrative from Claude AI…"                        | "150–250-word narrative from Gemini AI…"                                      |
+| `master_prompt/NSE_BSE_Analyser_Master_Prompt_v7_FINAL.txt` | 1626, 1628, 1772, 1777, 1796, 1802 | Claude / Anthropic                                                | Gemini                                                                          |
 
 **Deliberately preserved** to avoid a DB migration:
 
@@ -1552,10 +1583,10 @@ Behaviour tests (53.1a–h, 53.2a–e, 53.3a–q) replicate the patched logic in
 
 ### Verification matrix
 
-| Configuration | Group 1–52 | Group 53 | Final |
-|---------------|------------|----------|-------|
-| Patched code + Group 53 | 368 ✓ | 41 ✓ | **409 / 409** pass, exit 0 |
-| Unpatched code + Group 53 | 368 ✓ | 34 ✓ + 7 ❌ | 402 / 409, exit 1 |
+| Configuration             | Group 1–52 | Group 53     | Final                            |
+| ------------------------- | ----------- | ------------ | -------------------------------- |
+| Patched code + Group 53   | 368 ✓      | 41 ✓        | **409 / 409** pass, exit 0 |
+| Unpatched code + Group 53 | 368 ✓      | 34 ✓ + 7 ❌ | 402 / 409, exit 1                |
 
 The 7 expected failures on unpatched code are exactly the source-marker checks — confirming Group 53 will detect a future revert.
 
@@ -1589,14 +1620,14 @@ These remain follow-up candidates:
 
 Six follow-up fixes from the post-v12.4 issue list. Where v12.4 was production-blocker triage, v12.5 is the next layer down — visual polish, dedup correctness, sanity caps. None of these are scoring-behavior changes.
 
-| Fix | Issue | File(s) touched |
-|---|---|---|
-| #5  MoS cap marker (`*` on label)   | `analysis/fair_value_engine.py` + `master_funnel.py` |
-| #7  Gold sheet dynamic red headers  | `reporting/excel_generator.py` |
-| #8  Gold rename F-Score → Piotroski | `reporting/excel_generator.py` + `reporting/tooltip_formatter.py` |
-| #10 Early Mover dedup prefix-match  | `master_funnel.py` |
-| #12 Altman Z sanity cap at 10       | `analysis/forensics_engine.py` |
-| #13 CCC Days `—` for finance sector | `analysis/forensics_engine.py` |
+| Fix                                    | Issue                                                                 | File(s) touched |
+| -------------------------------------- | --------------------------------------------------------------------- | --------------- |
+| #5  MoS cap marker (`*` on label)    | `analysis/fair_value_engine.py` + `master_funnel.py`              |                 |
+| #7  Gold sheet dynamic red headers     | `reporting/excel_generator.py`                                      |                 |
+| #8  Gold rename F-Score → Piotroski   | `reporting/excel_generator.py` + `reporting/tooltip_formatter.py` |                 |
+| #10 Early Mover dedup prefix-match     | `master_funnel.py`                                                  |                 |
+| #12 Altman Z sanity cap at 10          | `analysis/forensics_engine.py`                                      |                 |
+| #13 CCC Days `—` for finance sector | `analysis/forensics_engine.py`                                      |                 |
 
 All are locked behind 30 new regression tests in **Group 54** of `test_v11.0.2_full_withdummies.py`. Total test count: **409 → 439**, all passing.
 
@@ -1771,9 +1802,9 @@ Test 44.2 was also updated — the FV composite output now has 8 keys (added `cf
 
 ### Verification matrix
 
-| Configuration | Group 1–53 | Group 54 | Final |
-|---|---|---|---|
-| Patched code + Group 54 | 409 ✓ | 30 ✓ | **439 / 439** pass, exit 0 |
+| Configuration           | Group 1–53 | Group 54 | Final                            |
+| ----------------------- | ----------- | -------- | -------------------------------- |
+| Patched code + Group 54 | 409 ✓      | 30 ✓    | **439 / 439** pass, exit 0 |
 
 ### Issues attempted but deferred
 
@@ -1819,6 +1850,7 @@ if _r1_v > 0 and _r2_v > 0 and abs(_r1_v - _r2_v) / _r1_v < _R2_TOLERANCE:
 ```
 
 **Display side** (`master_funnel.py:1781-1787`):
+
 ```python
 stock["support_2"] = round(float(s2), 2) if s2 else "—"
 stock["resist_2"]  = round(float(r2), 2) if r2 else "—"
@@ -1843,6 +1875,7 @@ The engine's bucket-assignment code was dead. Three concerns this raised:
 **v12.6 fix**: delete the bucket-assignment block in `get_composite_fair_value`. Engine output dict no longer contains `mos_label`. Funnel is the single source of truth.
 
 The funnel's bucket scheme (kept):
+
 ```
 mos_pct > 40   → "EXCEPTIONAL"
 mos_pct > 25   → "STRONG"
@@ -1887,11 +1920,13 @@ CFV is still shown to the user (so they can decide for themselves). `mos_pct` is
 **Display side** (`master_funnel.py`): when `cfv_thin_models` is True, the funnel appends `†` to `mos_label` (after `*` for capped). So the user sees something like `"EXCEPTIONAL†"` or `"EXCEPTIONAL*†"` and the tooltip explains: "trailing `†` = CFV based on fewer than 3 valuation models — treat with caution."
 
 **Why MIN_MODELS = 3** (not 2 and not 4):
+
 - 2 is too permissive — a 2-model average is barely better than 1.
 - 4 is too strict — would lose the score bonus for stocks where M5 (EV/EBITDA) genuinely doesn't apply (financials), M6 (DDM) genuinely doesn't apply (no dividends), or M7 (PEG) genuinely doesn't apply (no growth data). A typical industrial mid-cap legitimately fires 4-5 of M1–M7, not all 7.
 - 3 forces multiple independent valuation lenses (DCF + multiple-based + book-based) without requiring all of them.
 
 **Behavior change in production**:
+
 - Stocks with **full FV** (≥3 models): zero change. Score adjustment fires as before.
 - Stocks with **thin FV** (1-2 models): composite score drops by 4-12 points, depending on what the score bonus would have been. Some borderline-BUY stocks become NEUTRAL. Some borderline-NEUTRAL become AVOID. Direction is always toward less-confident verdict — none promoted up.
 
@@ -1914,13 +1949,14 @@ Old: NPM Q3 %     →  New: NPM Q-2 %
 Reads as "this quarter / one ago / two ago" — chronologically unambiguous.
 
 **Crucial implementation detail**: the **DB column keys** (`npm_q1`, `npm_q2`, `npm_q3`) are deliberately **unchanged**. Only the display labels change. This means:
+
 - Zero schema migration
 - Zero scoring-logic change (margin_expansion still reads `npm_q1 > npm_q2 > npm_q3` to detect the rising trend; that's still correct because `npm_q1` is still the latest quarter in the data)
 - The Excel column tuple format `("display_label", width, db_key)` was the only place that needed to change
 
 All glossary entries (2 blocks), tooltip dict entries, Margin Expansion narrative (2 places), section narrative, and `_ICON_FAMILIES` set were updated to reflect the new labels while preserving the data semantics.
 
-### #14 — "[AI <verb> — <reason>]" placeholder format
+### #14 — "[AI <verb></verb> — <reason></reason>]" placeholder format
 
 **Files: `master_funnel.py`, `ai/ai_analyst.py`**
 
@@ -2002,12 +2038,12 @@ Plus 3 cosmetic comment/docstring updates in the same file to match the new cons
 
 The codebase has 4 other "1-year" references that look similar but encode the financial definition of "52 weeks", not the data-fetch knob:
 
-| Location | Value | Why kept |
-|---|---|---|
-| `backfill_history.py:768` `_lb2 = min(252, len(prior_h))` | 252 trading days | "Prior 52-week" rolling window — by financial convention 52 weeks = 252 trading days |
-| `backfill_history.py:926` `last_252 = grp.tail(252)` | 252 trading days | "52W High / 52W Low" — same convention |
-| `backfill_history.py:1993` `* 365` (CCC formula) | 365 calendar days | DIO/DSO/DPO are by-definition annualised over 365 days — every accounting textbook on Earth uses this |
-| `master_funnel.py:1153-55` `'-365 days'` SQL filter | 365 calendar days | SQL equivalent of "52W high/low" — calendar arithmetic to bound the same trading-day window |
+| Location                                                      | Value             | Why kept                                                                                               |
+| ------------------------------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------ |
+| `backfill_history.py:768` `_lb2 = min(252, len(prior_h))` | 252 trading days  | "Prior 52-week" rolling window — by financial convention 52 weeks = 252 trading days                  |
+| `backfill_history.py:926` `last_252 = grp.tail(252)`      | 252 trading days  | "52W High / 52W Low" — same convention                                                                |
+| `backfill_history.py:1993` `* 365` (CCC formula)          | 365 calendar days | DIO/DSO/DPO are by-definition annualised over 365 days — every accounting textbook on Earth uses this |
+| `master_funnel.py:1153-55` `'-365 days'` SQL filter       | 365 calendar days | SQL equivalent of "52W high/low" — calendar arithmetic to bound the same trading-day window           |
 
 Changing any of these would silently redefine what columns like "52W High (₹)" mean, breaking trader expectations and tooltip accuracy.
 
@@ -2271,6 +2307,7 @@ Pre-v12.7 the daily flow saved today's NSE+BSE prices to `daily_prices` but neve
 ### Group 57 test coverage (26 tests)
 
 Code-shape locks (16 tests):
+
 - 57.1a–c: chunk SELECT exchange, drop_duplicates, NSE preference
 - 57.2a: structured error counter present
 - 57.3a, 57.4a: enrich_prices + delivery UPDATE NSE-scoped
@@ -2282,6 +2319,7 @@ Code-shape locks (16 tests):
 - 57.13a: workflow YAML passes 400 (carry-over from v12.6.1 follow-through)
 
 End-to-end behaviour (10 tests, 57.14a–g + 57.15a–b):
+
 - Synthetic DB with DUAL_LISTED + NSE_ONLY + BSE_ONLY symbols populates technicals correctly for all three
 - DUAL_LISTED has non-zero SMA200, RSI14, distinct R1 vs R2
 - chg_2w matches NSE-only ground truth (within 0.05%)
@@ -2321,6 +2359,7 @@ chunk_hist = (chunk_hist
 The intent: for each `(symbol, date)` keep the NSE row, drop the BSE duplicate. The dedup KEY's sort is correct — it clusters all NSE rows of a symbol first (because `_exch_pref=0` sorts before `=1`), so `drop_duplicates(keep='first')` picks NSE.
 
 **The bug.** Sorting by `(_exch_pref, date)` clusters BY EXCHANGE first, then date within each exchange. Result row order:
+
 - positions 0..222: NSE rows (in date order, but only on the 222 days NSE bhavcopy succeeded)
 - positions 223..235: BSE rows (only the dates NSE failed — scattered throughout the year, not at the end)
 
@@ -2329,6 +2368,7 @@ Post-`drop_duplicates(keep='first')`, the survivors are: 222 NSE rows (date-orde
 `compute_technicals` then does `df = hist.sort_values('date').copy()`. This re-sorts by date — but `sort_values` reshuffles the integer index to whatever positions the rows came from. Result: integer index becomes `[222, 0, 1, 2, ..., 221, 223, 9, 224, ...]` — non-monotonic.
 
 The v12.4-introduced lines 794-795 are:
+
 ```python
 sup2 = sup2.reindex(l.index, method="ffill")
 res2 = res2.reindex(h.index, method="ffill")
@@ -2375,23 +2415,19 @@ Each 404 takes ~5–8s wall-clock (vs ~1.5–2.5s for a 200) because yfinance's 
 **Fix architecture (Option C — both cache + silence).**
 
 1. **New table** `failed_yfinance_lookups (symbol, suffix, failed_on, error_type)` with composite PK `(symbol, suffix)`. Created in `init_all_tables`.
-
 2. **Three helpers** in `backfill_history.py`:
+
    - `_silence_yfinance_logger()` — sets `yfinance`, `yfinance.scrapers.quote`, `yfinance.data` loggers to CRITICAL. Idempotent.
    - `_load_yf_404_cache(conn) -> set` — returns set of `(symbol, suffix)` tuples with `failed_on >= today - 30 days`.
    - `_record_yf_404(conn, symbol, suffix)` — INSERT OR REPLACE the (symbol, suffix) row with today's date.
-
 3. **Three call-site integrations** in `_fetch_yfinance_data`:
+
    - Pre-loop: `_yf_skip = _load_yf_404_cache(conn)` if conn provided.
    - Skip-check: `if (sym, ".NS") in _yf_skip: continue`.
    - Empty-result + exception → `_record_yf_404(conn, sym, ".NS")` (detect 404 via "404" or "not found" in error string).
-
 4. **CR-fallback path** (`.NS/.BO` loop for current_ratio computation, line 1714+): same pattern — skip if `(sym, suffix) in _yf_skip`, record on 404 exception.
-
 5. **Income-statement path** (line 1857+): skip + record.
-
 6. **`forensics_engine.py::fetch_forensic_inputs`**: signature now accepts `skip_set` parameter. Inside the `.NS/.BO` loop, `if (symbol, suffix) in _skip: continue`. Module-import-time logger silencing too.
-
 7. **`master_funnel.py`**: pre-loads `_yf_skip_set` once before the per-stock loop, passes `skip_set=_yf_skip_set` to `ForensicsEngine.fetch_forensic_inputs`. Logs cache size at start of run if non-zero.
 
 **TTL design choice.** 30 days picks up corporate actions that eventually propagate to Yahoo's universe (e.g., a renamed ticker might appear in Yahoo's data 2-4 weeks after NSE updates symbols). Self-healing: cached 404s automatically retry after 30 days, so we never permanently exclude a symbol.
@@ -2403,6 +2439,7 @@ Each 404 takes ~5–8s wall-clock (vs ~1.5–2.5s for a 200) because yfinance's 
 ### Group 58 test coverage (10 tests)
 
 Code-shape locks (5 tests):
+
 - 58.1a: dedup re-sorts by (symbol, date) AFTER drop_duplicates
 - 58.2a: compute_technicals resets index after sort_values
 - 58.4a: failed_yfinance_lookups table exists with (symbol, suffix) PK
@@ -2410,6 +2447,7 @@ Code-shape locks (5 tests):
 - 58.8a: master_funnel pre-loads cache + passes skip_set
 
 End-to-end behaviour (5 tests):
+
 - 58.3a — synthetic 3 stocks with NSE missing on the same 13 specific dates as production (2025-03-31, 2025-04-10/14/18, 2025-05-01, 2025-08-15/27, 2025-10-02/22, 2025-11-05, 2025-12-25, 2026-01-15/26 — represented by index positions {0, 24, 48, 72, 96, 120, 144, 168, 192, 216, 230, 240, 246} in the 247-day series), all 3 populate.
 - 58.3b — zero `compute_technicals: N symbols failed` log line (was 494 → 495 in v12.7 production)
 - 58.5a — cache record + load works end-to-end
@@ -2422,37 +2460,37 @@ Delete `market_data.db` (or truncate `daily_prices` / `technical_indicators` / `
 
 ### Expected after first v12.8 run
 
-| Metric | v12.7 (last run) | v12.8 expected |
-|---|---|---|
-| Excel "SMA 200" populated | 88/99 | 99/99 (or ≥97/99 — 2 may legitimately be NEW IPOs with <200 days) |
-| Excel "Resist 1" populated | 92/99 | 99/99 |
-| Excel "Resist 2" populated | 88/99 | 90-99 (some legitimately "—" per v12.6 R2 collapse fix) |
-| Stocks fully missing technicals (HALEOSLABS et al.) | 7/99 | 0/99 |
-| `compute_technicals: N symbols failed` | 494→495 | 0 (or single-digit edge cases) |
-| HTTP Error 404 lines in run log | 3-5 visible | 0 (logger silenced) |
-| 404 cache size after first run | 0 (table empty) | 5-15 (TATAMOTORS, DHANI, ESILVER + others) |
-| Subsequent run latency saved | n/a | ~30-90s (skip cached 404s) |
+| Metric                                              | v12.7 (last run) | v12.8 expected                                                      |
+| --------------------------------------------------- | ---------------- | ------------------------------------------------------------------- |
+| Excel "SMA 200" populated                           | 88/99            | 99/99 (or ≥97/99 — 2 may legitimately be NEW IPOs with <200 days) |
+| Excel "Resist 1" populated                          | 92/99            | 99/99                                                               |
+| Excel "Resist 2" populated                          | 88/99            | 90-99 (some legitimately "—" per v12.6 R2 collapse fix)            |
+| Stocks fully missing technicals (HALEOSLABS et al.) | 7/99             | 0/99                                                                |
+| `compute_technicals: N symbols failed`            | 494→495         | 0 (or single-digit edge cases)                                      |
+| HTTP Error 404 lines in run log                     | 3-5 visible      | 0 (logger silenced)                                                 |
+| 404 cache size after first run                      | 0 (table empty)  | 5-15 (TATAMOTORS, DHANI, ESILVER + others)                          |
+| Subsequent run latency saved                        | n/a              | ~30-90s (skip cached 404s)                                          |
 
 ### Combined v12.7 + v12.8 column verification
 
 All 14 user-asked technical Excel columns post-v12.8:
 
-| Column | Source | Expected coverage |
-|---|---|---|
-| SMA 200 | `technical_indicators.sma_200` | 99/99 (or ≥97 for new IPOs) |
-| Supertrend | `technical_indicators.supertrend` | 99/99 |
-| ADX | `technical_indicators.adx` | 99/99 |
-| RSI (14) | `technical_indicators.rsi_14` | 99/99 |
-| MACD Signal | `technical_indicators.macd_signal_txt` | 99/99 |
-| Stoch %K | `technical_indicators.stoch_k` | 99/99 |
-| MFI | `technical_indicators.mfi_14` | 99/99 |
-| OBV Signal | `technical_indicators.obv_signal` | 99/99 |
-| Above VWAP | `technical_indicators.above_vwap` | 99/99 |
-| Chart Pattern | `master_funnel:2743` (today's OHLC) | 99/99 (was already working pre-v12.8) |
-| Support 1 (₹) | `technical_indicators.support1` | 99/99 |
-| Support 2 (₹) | `technical_indicators.support2` | 90-99 ("—" honestly when prior 252d max ≈ recent 20d max — v12.6 design) |
-| Resist 1 (₹) | `technical_indicators.resist1` | 99/99 |
-| Resist 2 (₹) | `technical_indicators.resist2` | 90-99 (same as S2) |
+| Column         | Source                                   | Expected coverage                                                           |
+| -------------- | ---------------------------------------- | --------------------------------------------------------------------------- |
+| SMA 200        | `technical_indicators.sma_200`         | 99/99 (or ≥97 for new IPOs)                                                |
+| Supertrend     | `technical_indicators.supertrend`      | 99/99                                                                       |
+| ADX            | `technical_indicators.adx`             | 99/99                                                                       |
+| RSI (14)       | `technical_indicators.rsi_14`          | 99/99                                                                       |
+| MACD Signal    | `technical_indicators.macd_signal_txt` | 99/99                                                                       |
+| Stoch %K       | `technical_indicators.stoch_k`         | 99/99                                                                       |
+| MFI            | `technical_indicators.mfi_14`          | 99/99                                                                       |
+| OBV Signal     | `technical_indicators.obv_signal`      | 99/99                                                                       |
+| Above VWAP     | `technical_indicators.above_vwap`      | 99/99                                                                       |
+| Chart Pattern  | `master_funnel:2743` (today's OHLC)    | 99/99 (was already working pre-v12.8)                                       |
+| Support 1 (₹) | `technical_indicators.support1`        | 99/99                                                                       |
+| Support 2 (₹) | `technical_indicators.support2`        | 90-99 ("—" honestly when prior 252d max ≈ recent 20d max — v12.6 design) |
+| Resist 1 (₹)  | `technical_indicators.resist1`         | 99/99                                                                       |
+| Resist 2 (₹)  | `technical_indicators.resist2`         | 90-99 (same as S2)                                                          |
 
 If any column is below this expected coverage after the v12.8 deploy, the v12.7 fix #2 structured counter will surface the failing symbols in the run log. That's the canary for "investigate next session."
 
@@ -2477,12 +2515,14 @@ If any column is below this expected coverage after the v12.8 deploy, the v12.7 
 The v10.3 implementation was a placeholder using only TATA = (NI-CFO)/TA, bucketed into 3 hardcoded values (-2.50, -2.22, -1.50). Lost all the discriminating power of the real formula — a stock with rapidly-growing receivables relative to sales (DSRI spike — classic revenue-stuffing signal) was invisible.
 
 **Fix:** Real 8-variable Beneish (1999) formula:
+
 ```
 M = -4.84 + 0.92·DSRI + 0.528·GMI + 0.404·AQI + 0.892·SGI
     + 0.115·DEPI - 0.172·SGAI + 4.679·TATA - 0.327·LVGI
 ```
 
 Each index compares current year (`_t`) to prior year (`_t1`):
+
 - DSRI = Days Sales in Receivables (rec_t/sales_t) ÷ (rec_t1/sales_t1) — flags revenue stuffing
 - GMI = Gross Margin Index (prior/current) — flags margin pressure
 - AQI = Asset Quality Index (1 - (CA+PPE)/TA)_t / same_t1
@@ -2493,6 +2533,7 @@ Each index compares current year (`_t`) to prior year (`_t1`):
 - TATA = Total Accruals to Total Assets (current period only)
 
 **Implementation: 2-path with fallback.**
+
 - Path 1 (preferred): Real formula. Requires foundational fields in BOTH periods (sales_t/t1, ta_t/t1, tl_t/t1). Each ratio uses neutral 1.0 fallback when its component data is missing.
 - Path 2 (fallback): v10.3 single-period accrual proxy. Used for newly-listed stocks, sparse small-caps where yfinance returns only 1 year of data.
 
@@ -2509,6 +2550,7 @@ Each index compares current year (`_t`) to prior year (`_t1`):
 70% of stocks were scoring HIGH because the v10.8 calculation compared `cfo` (annual TTM from yfinance income_stmt) against `q_pat_cr` (quarterly PAT from quarterly_income_stmt). This 4× unit mismatch made the 0.8 HIGH threshold effectively 0.2 in real annualized terms — nearly everything qualified.
 
 Production examples:
+
 - NESTLEIND: q_pat=873 Cr, CFO=3850 Cr → ratio 4.41 → HIGH (real annualized: 1.10 — still HIGH but barely)
 - JKCEMENT: q_pat=360 Cr, CFO=1704 Cr → ratio 4.73 → HIGH (real: 1.18)
 - A marginal stock with q_pat=200 Cr, CFO=250 Cr (annual) → ratio 1.25 → HIGH (real: 0.31 → LOW, honest)
@@ -2562,6 +2604,7 @@ stock["guard_reasons"]    = ", ".join(_refresh_reasons)
 ### Test coverage (Group 59 + Group 60 = 13 new tests)
 
 **Group 59 — Beneish M (7 tests):**
+
 - 59.1a: Honest stock continuous output between -3.5 and -2.22
 - 59.2a: Aggressive-accrual stock → M > -2.22 (flagged)
 - 59.3a: Thin-data → proxy fallback bucket
@@ -2571,6 +2614,7 @@ stock["guard_reasons"]    = ", ".join(_refresh_reasons)
 - 59.7a: Extreme/corrupt input clamped to [-10, 10]
 
 **Group 60 — Earn Quality + Spike refresh (6 tests):**
+
 - 60.1a: Marginal stock (q_pat=200, CFO=250) → LOW (post-fix), was HIGH pre-fix
 - 60.2a: Annual NI path used directly when available
 - 60.3a: Returns "—" when no PAT data
@@ -2584,14 +2628,14 @@ stock["guard_reasons"]    = ", ".join(_refresh_reasons)
 
 ### Expected after first v12.9 run
 
-| Metric | v12.8 (last run) | v12.9 expected |
-|---|---|---|
-| Beneish M unique values | 4 | ~80-95 (continuous) |
-| Beneish distribution shape | 3-bucket (-2.5/-2.22/-1.5) | Bell-shaped, center -2.0 to -2.5 |
-| Earn Quality HIGH count | 70/100 | 30-40/100 |
-| Earn Quality MODERATE count | 1/100 | ~25/100 |
-| Earn Quality LOW count | 14/100 | 25-30/100 |
-| Spike Score for BANARISUG-class | 0 (false-suppressed) | 2-3 (real triggers honored) |
+| Metric                          | v12.8 (last run)           | v12.9 expected                   |
+| ------------------------------- | -------------------------- | -------------------------------- |
+| Beneish M unique values         | 4                          | ~80-95 (continuous)              |
+| Beneish distribution shape      | 3-bucket (-2.5/-2.22/-1.5) | Bell-shaped, center -2.0 to -2.5 |
+| Earn Quality HIGH count         | 70/100                     | 30-40/100                        |
+| Earn Quality MODERATE count     | 1/100                      | ~25/100                          |
+| Earn Quality LOW count          | 14/100                     | 25-30/100                        |
+| Spike Score for BANARISUG-class | 0 (false-suppressed)       | 2-3 (real triggers honored)      |
 
 If Beneish distribution still shows 4-bucket pattern, check that yfinance returns 2+ years of balance-sheet data for the funnel stocks. The v12.8 404 cache might be incorrectly skipping symbols whose `.NS` info call fails but whose balance_sheet would succeed — review `failed_yfinance_lookups` table.
 
@@ -2612,6 +2656,7 @@ If Beneish distribution still shows 4-bucket pattern, check that yfinance return
 ### What was changed
 
 **1. New module `ingestion/nse_pledge.py`** (~140 lines)
+
 - Calls NSE's bulk pledge endpoint `https://www.nseindia.com/api/corporates-pledgedata?index=equities`
 - ONE API call returns the latest pledge filing for every listed company (~5,000 stocks)
 - `fetch_bulk_pledge_data(session)` returns `{symbol: pct_pledged}` dict
@@ -2621,6 +2666,7 @@ If Beneish distribution still shows 4-bucket pattern, check that yfinance return
 - Network-failure-safe: returns empty dict, pipeline continues without pledge data
 
 **2. Extended `_nse_shareholding(symbol, session)` in `backfill_history.py`**
+
 - Pre-v13.0: read only `shareholdingPatterns.data[0]` (latest quarter)
 - v13.0: reads `data[0]` AND `data[1]` (latest + prior), computes 3 QoQ deltas
 - Adds keys: `promoter_qoq`, `fii_qoq`, `dii_qoq` (only when prior quarter has non-zero values)
@@ -2628,22 +2674,26 @@ If Beneish distribution still shows 4-bucket pattern, check that yfinance return
 - Was a free upgrade waiting to be unlocked
 
 **3. NSE shareholding enrichment loop in `backfill_history.py`**
+
 - Now writes captured QoQ deltas back to sh_rows (was previously discarded)
 - Stops skipping rows that have DII data but no QoQ — runs the call when EITHER is missing
 - Bulk pledge fetch added at the end of enrichment (after per-symbol corp-info loop)
 - Both new fetches respect existing rate-limit guards
 
 **4. Pledge direction vocabulary alignment** (`master_funnel.py:803-808`)
+
 - Pre-v13.0 bug: master_funnel wrote IMPROVING/DETERIORATING but `scoring_engine.py:180` checked for FALLING/RISING — the `_has_paid_sentiment` gate **never** matched on pledge movement, silently breaking the QoQ-Δ-aware sentiment-informed scoring path for any stock with real pledge movement. Pre-v13.0 this was invisible because `pledge_pct` was hardcoded 0 (no movement to detect). v13.0 makes pledge real, so this latent bug now matters.
 - Fix: write FALLING / RISING / STABLE / "—" to match the read path. Tooltips, glossary, and `ownership_tracker.py` already used this vocabulary; only master_funnel was outlying.
 
 **5. Documentation refreshed**
+
 - `reporting/tooltip_formatter.py`: Pledge Direction tooltip explains v13.0 vocab alignment + v13.0 NSE source
 - `reporting/excel_generator.py` glossary: Pledge %, Pledge Direction, Pro QoQ Δ, FII QoQ Δ, DII %, DII QoQ Δ — all 6 entries reflect v13.0 NSE sourcing. Both glossary blocks (line ~444 and ~722) synced — second block had pre-existing stale "INCREASING/DECREASING" vocab; replaced with FALLING/RISING.
 - `CLAUDE.md` (this file): Section 32 added.
 - `readme.md`: v13.0 row added to top of version table.
 
 **6. SHAREHOLDING section color changed (visual cleanup)**
+
 - Pre-v13.0: section header used `#EA580C` (bright red-orange), which visually conflicted with AVOID-row tier-3 colors (`#FEE2E2` light red). The section looked perpetually "alarming" even for stocks with clean shareholding patterns.
 - v13.0: changed to `#7C3AED` (violet) — neutral, in-palette, non-red-adjacent. Matches the SCORES section color for visual consistency.
 - Updated in both color-map locations: line 48 (FULL_SECTIONS tuple) and line 961 (SECTION_COLORS dict).
@@ -2666,13 +2716,13 @@ If Beneish distribution still shows 4-bucket pattern, check that yfinance return
 
 **What the data flow looks like post-v13.0:**
 
-| Score component | Pre-v13.0 behaviour | Post-v13.0 behaviour |
-|---|---|---|
-| `sentiment_score` (master_funnel:2285-2343) | Default 50 for ~all stocks (no QoQ + pledge dir mismatched) | Moves -15 to +20 from 50 based on real QoQ + pledge direction |
-| `_has_paid_sentiment` gate (scoring_engine:174-181) | Almost always False → weights redistributed (no sent contribution) | True for 50-80 stocks → canonical weights with sent_raw × 0.10 |
-| Anti-trigger guard (master_funnel:2680-2705) | pledge>20 never fired (all pledge=0) | Fires for ~5-15 funnel stocks → spike_count zeroed + risk_flag = -10 |
-| Storm Score (scoring_engine:340 region) | promoter_qoq>0 bonus never fired | +1 fires for stocks with real promoter accumulation |
-| Early Entry score (master_funnel:2370 region) | FII QoQ > +1pp branch never fired | +8 fires for genuine FII accumulation |
+| Score component                                       | Pre-v13.0 behaviour                                                 | Post-v13.0 behaviour                                                  |
+| ----------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `sentiment_score` (master_funnel:2285-2343)         | Default 50 for ~all stocks (no QoQ + pledge dir mismatched)         | Moves -15 to +20 from 50 based on real QoQ + pledge direction         |
+| `_has_paid_sentiment` gate (scoring_engine:174-181) | Almost always False → weights redistributed (no sent contribution) | True for 50-80 stocks → canonical weights with sent_raw × 0.10      |
+| Anti-trigger guard (master_funnel:2680-2705)          | pledge>20 never fired (all pledge=0)                                | Fires for ~5-15 funnel stocks → spike_count zeroed + risk_flag = -10 |
+| Storm Score (scoring_engine:340 region)               | promoter_qoq>0 bonus never fired                                    | +1 fires for stocks with real promoter accumulation                   |
+| Early Entry score (master_funnel:2370 region)         | FII QoQ > +1pp branch never fired                                   | +8 fires for genuine FII accumulation                                 |
 
 **Net effect on composite Score per stock:** typically ±0–5 points for most, but ±10–15 for stocks at the extremes (high-pledge red-flag stocks score lower; high-accumulation stocks score higher). **All shifts are intended behaviour** — the framework was correctly designed; the data just wasn't there before.
 
@@ -2696,21 +2746,22 @@ If Beneish distribution still shows 4-bucket pattern, check that yfinance return
 ### Action required at deploy
 
 **No DB delete required.** Schema unchanged. On the first v13.0 run:
+
 - Bulk pledge fetch runs → populates ~50-200 of the funnel's 100 stocks (most listed companies have zero pledge so don't appear in NSE feed at all — that's correct behaviour, not a bug)
 - QoQ deltas populate from existing per-symbol corp-info calls → ~50-80 stocks get real Pro/FII/DII QoQ values immediately
 - Pledge direction populates as FALLING/RISING/STABLE for stocks with both current and prior pledge (most show "—" until 2nd run accumulates history)
 
 ### Expected after first v13.0 run
 
-| Metric | v12.9 | v13.0 expected |
-|---|---|---|
-| Pledge % populated stocks | 0/100 | 50–100/100 (real values 0–100% from NSE feed) |
-| Pledge Direction non-"—" | 0/100 | 5–20/100 first run, more on subsequent runs |
-| Pro QoQ Δ populated | 0/100 | 50–80/100 (NSE returns 2–4 quarters) |
-| FII QoQ Δ populated | 0/100 | 50–80/100 |
-| DII % populated | 0/100 | 50–80/100 |
-| DII QoQ Δ populated | 0/100 | 50–80/100 |
-| Spike Score behaviour | Anti-trigger guard had no real pledge to gate on — only Altman/Beneish drove suppression | Anti-trigger guard now genuinely fires on `pledge > 20%`. Stocks like VEDL, DBREALTY, ADANIPOWER will correctly see Spike → 0 |
+| Metric                    | v12.9                                                                                     | v13.0 expected                                                                                                                  |
+| ------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Pledge % populated stocks | 0/100                                                                                     | 50–100/100 (real values 0–100% from NSE feed)                                                                                 |
+| Pledge Direction non-"—" | 0/100                                                                                     | 5–20/100 first run, more on subsequent runs                                                                                    |
+| Pro QoQ Δ populated      | 0/100                                                                                     | 50–80/100 (NSE returns 2–4 quarters)                                                                                          |
+| FII QoQ Δ populated      | 0/100                                                                                     | 50–80/100                                                                                                                      |
+| DII % populated           | 0/100                                                                                     | 50–80/100                                                                                                                      |
+| DII QoQ Δ populated      | 0/100                                                                                     | 50–80/100                                                                                                                      |
+| Spike Score behaviour     | Anti-trigger guard had no real pledge to gate on — only Altman/Beneish drove suppression | Anti-trigger guard now genuinely fires on`pledge > 20%`. Stocks like VEDL, DBREALTY, ADANIPOWER will correctly see Spike → 0 |
 
 ### Network failure behaviour
 
@@ -2790,11 +2841,11 @@ Pre-fix: the displayed EE in Excel column 10 was post-bonus, but the `label` (Qu
 
 Production audit found 3 affected stocks:
 
-| Symbol | Score | Pre-bonus EE | Post-bonus EE | Excel showed (buggy) | Should be |
-|---|---|---|---|---|---|
-| MOCAPITAL | 72.66 | 65 | 73 | WATCHLIST | EARLY MOVER |
-| KIRLFER | 73.95 | 65 | 73 | WATCHLIST | EARLY MOVER |
-| KAMAHOLD | 72.21 | 55 | 63 | DEEP VALUE | DEEP VALUE EARLY MOVER |
+| Symbol    | Score | Pre-bonus EE | Post-bonus EE | Excel showed (buggy) | Should be              |
+| --------- | ----- | ------------ | ------------- | -------------------- | ---------------------- |
+| MOCAPITAL | 72.66 | 65           | 73            | WATCHLIST            | EARLY MOVER            |
+| KIRLFER   | 73.95 | 65           | 73            | WATCHLIST            | EARLY MOVER            |
+| KAMAHOLD  | 72.21 | 55           | 63            | DEEP VALUE           | DEEP VALUE EARLY MOVER |
 
 Fix: re-call `_assign_quick_pick(stock, _score_final)` inside the convergence-bonus `if` block, AFTER the EE update. Defensive: only re-runs when the bonus actually fires (no impact on stocks where the bonus condition didn't trigger). Same `scoring` instance, same method, same signature as the first call.
 
@@ -2821,12 +2872,12 @@ if (_score_final >= 70 and _rsi_final > 60 and _st_final == "BUY"
 
 ### Documents updated
 
-| File | Update |
-|---|---|
-| `reporting/tooltip_formatter.py` | MoS % and MoS Label tooltips note the '—' rendering rule for ETFs · Quick Pick tooltip notes the v13.x recompute timing |
-| `reporting/excel_generator.py` (GLOSSARY_DATA) | MoS % glossary row mentions ETF rendering · Quick Pick glossary row mentions the recompute |
-| `CLAUDE.md` | This §33 section |
-| `readme.md` | New v13.x row at top of version-history table |
+| File                                             | Update                                                                                                                    |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `reporting/tooltip_formatter.py`               | MoS % and MoS Label tooltips note the '—' rendering rule for ETFs · Quick Pick tooltip notes the v13.x recompute timing |
+| `reporting/excel_generator.py` (GLOSSARY_DATA) | MoS % glossary row mentions ETF rendering · Quick Pick glossary row mentions the recompute                               |
+| `CLAUDE.md`                                    | This §33 section                                                                                                         |
+| `readme.md`                                    | New v13.x row at top of version-history table                                                                             |
 
 Not touched: `pipeline_reference_v13_0.html` (describes scoring flow, not rendering edge cases) · `scoring_logic_3Stagefunnel_explained.md` (no QP/MoS rendering details).
 
@@ -2859,6 +2910,7 @@ Both are cliff-zone BUYs. Defensible if challenged ("score and MoS gate both pas
 **Fix 4 — `reporting/daily_report_generator.py:28-50` + `master_funnel.py:3082-3104` — HEADER honesty for placeholder market data**
 
 Pre-fix: header displayed `Nifty: 0.0 | Sensex: 0 | VIX: 12.0 | FII: ₹817.0Cr` with mood `—`. The mood line was correctly honest about NIFTY data being unavailable, but the second header line printed:
+
 - `Nifty: 0.0` — NIFTY 50 not ingested (master_funnel:3091 `get_nifty_close_from_db()` returns 0 because NIFTY 50 isn't in `daily_prices`)
 - `Sensex: 0` — hardcoded 0 in master_funnel:3092
 - `VIX: 12.0` — hardcoded constant in master_funnel:3096
@@ -2866,12 +2918,14 @@ Pre-fix: header displayed `Nifty: 0.0 | Sensex: 0 | VIX: 12.0 | FII: ₹817.0Cr`
 Mixing honest absence (`—`) with fake numeric precision is misleading. v13.x extends the same honesty principle: any market scalar that's a known placeholder renders as `—`. FII (real data from `get_latest_fii_net_cash()`) keeps numeric format.
 
 Two-file fix:
+
 - `master_funnel.py:3104`: `"vix": 12.0` → `"vix": 0`. Verified the `market_stats["vix"]` field has only ONE consumer (daily_report_generator) — the storm score path at `master_funnel.py:2648` uses its own hardcoded `market_vix=12.0` constant directly, not via market_stats. Confirmed by grep for `market_stats["vix"]` and `mkt.get("vix"`.
 - `reporting/daily_report_generator.py:38-58`: defensive renderer logic — if value is non-positive or non-numeric, render `—`. FII handled separately because it can be legitimately negative (net selling).
 
 **Fix 5 — `reporting/daily_report_generator.py:117-138` — SECTION F filter aligned with section intent**
 
 Pre-fix issues:
+
 1. Section title was hardcoded `"SECTION F — 2 EXIT ALERTS"` regardless of actual count
 2. Filter was `composite_score < 30` AND head(2) — only catches extreme outliers
 3. Production audit: 4 AVOID-verdict stocks existed (HDFCLIFE 34.09, VIPIND 29.04, UBL 37.22, RELIGARE 35.48) but only VIPIND would have qualified — and on the next pipeline run VIPIND's score moved to ≥30, so Section F became empty even though 4 stocks still warranted exit attention
@@ -2883,6 +2937,7 @@ Fix: align filter with section's intent ("EXIT ALERTS" = system's explicit AVOID
 User question: "Why does DEEP VALUE EARLY MOVER use 3 factors when the others use 2?"
 
 The answer is structural — DEEP VALUE EARLY MOVER is the **combo** of the two single-archetype rules above it:
+
 ```
 DEEP VALUE alone:      MoS > 25% AND Score > 70                       (no EE check)
 EARLY MOVER alone:                       Score > 55 AND EarlyEntry ≥ 70
@@ -2892,6 +2947,7 @@ DEEP VALUE EARLY MOVER:MoS > 25% AND Score > 70 AND EarlyEntry ≥ 60   ← comb
 The third factor isn't extra work — it inherits the value gates from DEEP VALUE and adds a momentum check. The notable design choice is the **EE threshold drop 70 → 60 in the combo**: when a stock already has high score AND deep undervaluation, you don't need an extreme momentum signal — moderate confirmation (EE≥60) is enough. Pure EARLY MOVER demands EE≥70 because momentum is the only thing speaking for stocks that may not have great fundamentals (Score > 55 floor, no MoS gate).
 
 Updates applied to 3 surfaces (no code logic change):
+
 1. `reporting/tooltip_formatter.py` — Quick Pick `TIPS` entry: added 9-line "Why does DEEP VALUE EARLY MOVER use 3 factors..." paragraph
 2. `reporting/excel_generator.py` — `_HDR_TIPS` Quick Pick header tooltip: condensed 6-line version
 3. `reporting/excel_generator.py` — `GLOSSARY_DATA` Quick Pick row: integrated explanation in single sentence
@@ -2899,11 +2955,13 @@ Updates applied to 3 surfaces (no code logic change):
 ### Test results
 
 22/22 tests pass across all 3 rounds:
+
 - Round 1 (test_fixes.py): 8/8
 - Round 2 (test_integration.py): 7/7
 - Round 3 (test_v13_x_round3.py): 7/7 — covers HEADER honesty, Section F filter + dynamic title + dotted-verdict tolerance + zero-AVOIDs case, tooltip + glossary content checks
 
 12/12 end-to-end checks against real production Excel data pass:
+
 - Section B: BUY-only ✅
 - ETFs: 8/8 render `—` ✅
 - Quick Pick: 3 known cases corrected ✅
@@ -2913,14 +2971,14 @@ Updates applied to 3 surfaces (no code logic change):
 
 ### Files changed in Round 3
 
-| File | Change |
-|---|---|
-| `master_funnel.py` | 1 line: `"vix": 12.0` → `"vix": 0` (with v13.x rationale comment) |
-| `reporting/daily_report_generator.py` | HEADER block: defensive renderer for placeholder values; SECTION F: AVOID filter + dynamic title |
-| `reporting/tooltip_formatter.py` | Quick Pick `TIPS` entry: combo + EE-asymmetry explanation |
-| `reporting/excel_generator.py` | `_HDR_TIPS` Quick Pick: condensed combo explanation; `GLOSSARY_DATA` Quick Pick: integrated explanation |
-| `CLAUDE.md` | This §33.1 addendum |
-| `readme.md` | v13.x row updated with Round 3 additions |
+| File                                    | Change                                                                                                      |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `master_funnel.py`                    | 1 line:`"vix": 12.0` → `"vix": 0` (with v13.x rationale comment)                                       |
+| `reporting/daily_report_generator.py` | HEADER block: defensive renderer for placeholder values; SECTION F: AVOID filter + dynamic title            |
+| `reporting/tooltip_formatter.py`      | Quick Pick`TIPS` entry: combo + EE-asymmetry explanation                                                  |
+| `reporting/excel_generator.py`        | `_HDR_TIPS` Quick Pick: condensed combo explanation; `GLOSSARY_DATA` Quick Pick: integrated explanation |
+| `CLAUDE.md`                           | This §33.1 addendum                                                                                        |
+| `readme.md`                           | v13.x row updated with Round 3 additions                                                                    |
 
 ---
 
@@ -2964,6 +3022,7 @@ Updates applied to 3 surfaces (no code logic change):
 **3. master_funnel.py logging hook** (~85 lines added after `excel_gen.generate_excel_reports()` returns). Iterates `excel_gen._get_gold()` (re-using the same 11-condition filter — single source of truth), parses entry_range string (handles en-dash, hyphen, currency symbol, comma), computes predicted_rr matching the Excel column logic, and writes to `gold_recommendations` via the helper. First-appearance check via `has_open_recommendation()` before insert. Defensive: per-symbol try/except so one bad row can't abort the loop. Console output: `📈 v14.0 outcome tracking: logged N Gold pick(s) (skipped X already-open, Y error)`.
 
 **4. NEW FILE: `track_outcomes.py`** (~280 lines). Run as `python3 track_outcomes.py` AFTER the daily pipeline. For every OPEN recommendation:
+
 - Loads `daily_prices` filtered `exchange='NSE'` from recommendation_date+1 forward (matches v12.7 dual-listed dedup convention).
 - Walks chronologically. Tracks running `max_runup_pct` and `max_drawdown_pct` on every bar.
 - First event check at each day:
@@ -2977,6 +3036,7 @@ Updates applied to 3 surfaces (no code logic change):
 - Idempotent: closed rows are skipped on subsequent runs because `get_open_recommendations()` filters them out.
 
 **5. New `🎯 Performance` sheet in Excel** (`reporting/excel_generator.py::_performance_sheet`, ~180 lines). Inserted between `📱 Delivery Preview` and `📖 Glossary` in tab order. Sections:
+
 - **Headline metrics** — Total Tracked / Closed / Open / Hit Rate (T1+) / SL Rate. Outcome breakdown counts (T1, T2, T3, SL, Expired).
 - **Speed metrics** — average days from recommendation to T1/T2/T3/SL.
 - **Diagnostic breakdowns** — three tables: by composite score band, by Quick Pick archetype, by sector. Each shows Total / T1+ Hits / SL Hits / Expired / Hit Rate (color-coded green/amber/red).
@@ -2985,6 +3045,7 @@ Updates applied to 3 surfaces (no code logic change):
 - **Empty-DB graceful handling** — first run shows "No Gold-pick history yet — tracking starts the first time a stock makes the Gold sheet" banner instead of crashing.
 
 **6. Tooltip + glossary updates** for new columns (per Rajkumar standing rule: "update tooltip, tooltip ref and glossary if any newly columns added"):
+
 - 14 new entries in `tooltip_formatter.py::TIPS` dict (cell-hover tooltips): TOTAL TRACKED, CLOSED, OPEN, HIT RATE (T1+), SL RATE, AVG DAYS → T1, AVG DAYS → T2, AVG DAYS → T3, AVG DAYS → SL, Max Runup %, Max DD %, Hit Rate, Days Held, Archetype.
 - 13 new rows in `excel_generator.py::GLOSSARY_DATA` under new "PERFORMANCE" group, all with "Where Used" = "🎯 Performance".
 - New `PERFORMANCE` color registered in `GRP_COLORS` (`B45309` matching the Gold-tier amber).
@@ -2994,13 +3055,13 @@ Updates applied to 3 surfaces (no code logic change):
 
 `/home/claude/tests/test_v14_outcome_tracking.py` — all pass.
 
-| Group | Tests | Coverage |
-|---|---|---|
-| G1 — Schema + helpers | 3 | Tables created with correct columns; first-appearance rule; get_open JOIN |
-| G2 — master_funnel hook | 2 | Entry-range parser (en-dash/hyphen/currency); predicted_rr formula |
-| G3 — Walk-forward (CP3) | 6 | T1_HIT detected; SL beats target on same-day ties; highest target wins; EXPIRED at 90 days; max_runup/drawdown tracked; closed rows immutable across reruns |
-| G4 — Performance sheet | 3 | Sheet present and ordered before Glossary; empty-DB shows graceful banner; full-data renders all 4 sections |
-| G5 — Tooltips/glossary | 3 | TIPS dict has all 14 entries; GLOSSARY_DATA has all 13 rows; PERFORMANCE color registered |
+| Group                    | Tests | Coverage                                                                                                                                                    |
+| ------------------------ | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G1 — Schema + helpers   | 3     | Tables created with correct columns; first-appearance rule; get_open JOIN                                                                                   |
+| G2 — master_funnel hook | 2     | Entry-range parser (en-dash/hyphen/currency); predicted_rr formula                                                                                          |
+| G3 — Walk-forward (CP3) | 6     | T1_HIT detected; SL beats target on same-day ties; highest target wins; EXPIRED at 90 days; max_runup/drawdown tracked; closed rows immutable across reruns |
+| G4 — Performance sheet  | 3     | Sheet present and ordered before Glossary; empty-DB shows graceful banner; full-data renders all 4 sections                                                 |
+| G5 — Tooltips/glossary  | 3     | TIPS dict has all 14 entries; GLOSSARY_DATA has all 13 rows; PERFORMANCE color registered                                                                   |
 
 **No-regression check**: all prior test suites still pass (8/8 v13.x R1 + 7/7 v13.x R2 + 7/7 v13.x R3 + 17/17 v14.0 = **39/39 passing**).
 
@@ -3050,12 +3111,12 @@ While building v14.1, discovered a quiet bug in v14.0's master_funnel logging ho
 
 ### Horizon-to-expiry mapping
 
-| Horizon (Excel column) | Expiry days | Reasoning |
-|---|---|---|
-| SHORT TERM | **30** | Upper bound of system's "2-4 weeks" claim |
-| POSITIONAL | **90** | Median of "1-3 months" — matches v14.0 default |
-| LONG TERM | **270** | ~9 months — median of "3-12 months" |
-| (missing/unknown) | **90** | Conservative default — backward-compat |
+| Horizon (Excel column) | Expiry days   | Reasoning                                       |
+| ---------------------- | ------------- | ----------------------------------------------- |
+| SHORT TERM             | **30**  | Upper bound of system's "2-4 weeks" claim       |
+| POSITIONAL             | **90**  | Median of "1-3 months" — matches v14.0 default |
+| LONG TERM              | **270** | ~9 months — median of "3-12 months"            |
+| (missing/unknown)      | **90**  | Conservative default — backward-compat         |
 
 ### What was added
 
@@ -3114,16 +3175,16 @@ ALTER TABLE inside try/except matches v11.0.2's existing idempotent migration pa
 
 ### Test coverage — 13 new tests in `tests/test_v14_1_outcome_tracking.py`
 
-| Group | Tests | Coverage |
-|---|---|---|
-| G1 — Mapping | 1 | horizon_to_expiry_days for all 4 cases incl. case-insensitive variants |
-| G2 — ALTER | 1 | Idempotent across 3 init calls; no duplicate columns |
-| G3 — Insert  | 1 | Stores expiry_days/expiry_date; defaults to 90 when missing |
-| G4 — Counter | 2 | Increments + idempotent same-day; doesn't increment on closed rows |
-| G5 — Tracker | 3 | SHORT expires at 30; LONG still open at 100 (waits for 270); legacy rows fall back to 90 |
-| G6 — Sheet   | 2 | BY TIME HORIZON appears; Open Positions has Horizon/Days Left/Re-app columns |
-| G7 — Diag    | 2 | EXPIRED missed-runup renders with correct avg; suppressed when <3 expired |
-| G8 — Bug fix | 1 | master_funnel reads `horizon` key, NOT `time_horizon` (v14.0 bug confirmed fixed) |
+| Group         | Tests | Coverage                                                                                 |
+| ------------- | ----- | ---------------------------------------------------------------------------------------- |
+| G1 — Mapping | 1     | horizon_to_expiry_days for all 4 cases incl. case-insensitive variants                   |
+| G2 — ALTER   | 1     | Idempotent across 3 init calls; no duplicate columns                                     |
+| G3 — Insert  | 1     | Stores expiry_days/expiry_date; defaults to 90 when missing                              |
+| G4 — Counter | 2     | Increments + idempotent same-day; doesn't increment on closed rows                       |
+| G5 — Tracker | 3     | SHORT expires at 30; LONG still open at 100 (waits for 270); legacy rows fall back to 90 |
+| G6 — Sheet   | 2     | BY TIME HORIZON appears; Open Positions has Horizon/Days Left/Re-app columns             |
+| G7 — Diag    | 2     | EXPIRED missed-runup renders with correct avg; suppressed when <3 expired                |
+| G8 — Bug fix | 1     | master_funnel reads`horizon` key, NOT `time_horizon` (v14.0 bug confirmed fixed)     |
 
 **No-regression check**: 8/8 + 7/7 + 7/7 + 17/17 + 13/13 = **52/52 tests pass across 5 suites**.
 
@@ -3138,11 +3199,11 @@ ALTER TABLE inside try/except matches v11.0.2's existing idempotent migration pa
 
 Compared to v14.0 with everything-90-day expiry:
 
-| Horizon | v14.0 behavior | v14.1 behavior | Hit rate impact |
-|---|---|---|---|
-| SHORT TERM | T1 hit on day 60 → T1_HIT (counted as win) | T1 hit on day 60 → EXPIRED (counted as fail at day 30) | **Lower** SHORT TERM hit rate (correctly stricter) |
-| POSITIONAL | T1 hit on day 50 → T1_HIT | Same — both 90-day windows | **Unchanged** |
-| LONG TERM | T1 hit on day 150 → EXPIRED (false miss) | T1 hit on day 150 → T1_HIT | **Higher** LONG TERM hit rate (correctly more patient) |
+| Horizon    | v14.0 behavior                              | v14.1 behavior                                          | Hit rate impact                                              |
+| ---------- | ------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------ |
+| SHORT TERM | T1 hit on day 60 → T1_HIT (counted as win) | T1 hit on day 60 → EXPIRED (counted as fail at day 30) | **Lower** SHORT TERM hit rate (correctly stricter)     |
+| POSITIONAL | T1 hit on day 50 → T1_HIT                  | Same — both 90-day windows                             | **Unchanged**                                          |
+| LONG TERM  | T1 hit on day 150 → EXPIRED (false miss)   | T1 hit on day 150 → T1_HIT                             | **Higher** LONG TERM hit rate (correctly more patient) |
 
 This makes hit rates meaningful **per horizon class** instead of mixing apples and oranges. After 60+ closed picks, you'll be able to see e.g. "POSITIONAL = 65% hit rate, but SHORT TERM only 35% — the system's high-momentum trigger is over-promising on speed."
 
@@ -3183,6 +3244,7 @@ The DB column name remains `time_horizon` (no schema rename — would have broke
 **The bug:** v14 logging hook fired AFTER `generate_excel_reports()`. So the Performance sheet was rendered using yesterday's gold_recommendations only — today's picks were logged 1 step too late, surfacing on Day+1. Off-by-one-day display bug.
 
 **Day-by-day evidence from user's actual production data:**
+
 - 2026-05-07 (Day 1): Pipeline runs → Performance sheet renders empty (no history) → AFTER save, 3 stocks logged (PETRONET, ITC, BSOFT)
 - 2026-05-08 (Day 2): Pipeline runs → Performance sheet renders showing yesterday's 3 stocks → AFTER save, 3 new stocks logged (HEXT, FIEMIND, VIKRAMSOLR)
 - User's question: "where are today's 3 stocks?" — they were logged but rendered one day late
@@ -3201,6 +3263,7 @@ The DB column name remains `time_horizon` (no schema rename — would have broke
 **The bug:** `track_outcomes.py` is the script that walks `daily_prices` forward and refreshes OPEN row fields (`current_price`, `current_pnl_pct`, `max_runup_pct`, `max_drawdown_pct`). It was a standalone script the user had to run separately — but in production, no one ever invoked it. So OPEN-row fields were stuck at the seed values from `insert_gold_recommendation` (current_price = cmp_at_recommendation, P&L=0, max_runup=0) forever. Performance sheet showed frozen-at-recommendation snapshots, not live tracker output.
 
 **Evidence from user's screenshot (2026-05-08):**
+
 - PETRONET: rec at ₹282.1, current ₹282.1 (identical), P&L +0.0%, max_runup +0.0%
 - ITC: rec at ₹307.4, current ₹307.4 (identical), P&L +0.0%, max_runup +0.0%
 - BSOFT: rec at ₹362.2, current ₹362.2 (identical), P&L +0.0%, max_runup +0.0%
@@ -3208,6 +3271,7 @@ The DB column name remains `time_horizon` (no schema rename — would have broke
 Same exact pattern across all 3 stocks → not a one-stock data error, but a structural bug. Tracker had never run.
 
 **The fix:** `master_funnel.py` now invokes `track_outcomes.main()` automatically as part of the pipeline. New ordering:
+
 1. v14 hook fires — log today's Gold picks (already in v14.1.2)
 2. **NEW v14.1.3** — `track_outcomes.main()` runs, refreshes all OPEN rows
 3. `generate_excel_reports()` — Performance sheet sees today's logged stocks AND fresh tracker output
@@ -3215,18 +3279,20 @@ Same exact pattern across all 3 stocks → not a one-stock data error, but a str
 This makes the tracker an automatic part of every pipeline run. No more manual invocation needed. Console output now shows tracker state in every pipeline log.
 
 **End-to-end simulation verified:**
-| Day | Price | current_price | P&L % | max_runup % |
-|-----|-------|--------------|-------|-------------|
-| 1 | rec at ₹380 | 380 | 0.0% | 0.0% |
-| 2 | high 395, close 392 | 392 | +3.2% | +4.0% |
-| 3 | high 415, close 410 | 410 | +7.9% | +9.2% |
-| 4 | high 420 → T1 hit | (T1_HIT @ 418) | (closed) | +10.5% |
+
+| Day | Price               | current_price  | P&L %    | max_runup % |
+| --- | ------------------- | -------------- | -------- | ----------- |
+| 1   | rec at ₹380        | 380            | 0.0%     | 0.0%        |
+| 2   | high 395, close 392 | 392            | +3.2%    | +4.0%       |
+| 3   | high 415, close 410 | 410            | +7.9%    | +9.2%       |
+| 4   | high 420 → T1 hit  | (T1_HIT @ 418) | (closed) | +10.5%      |
 
 **New test:** `test_g11_tracker_invoked_from_master_funnel` — verifies `from track_outcomes import main` is present, `_tracker_main()` is called, and ordering (hook → tracker → Excel) is preserved. Catches future regressions if anyone removes the integration.
 
 **Test count after fix:** 8 + 7 + 7 + 17 + **17** = **56/56 across 5 suites**.
 
 **Combined v14.1.2 + v14.1.3 user-visible effect:** After deploying both, tomorrow's Performance sheet will:
+
 1. Show today's 3 new stocks (HEXT, FIEMIND, VIKRAMSOLR) — v14.1.2 fix
 2. Have correct Current Price, P&L%, Max Runup% on yesterday's 3 stocks (PETRONET, ITC, BSOFT) — v14.1.3 fix
 3. Show 6 total OPEN positions (3 from each day) with live, accurate price tracking
@@ -3238,27 +3304,27 @@ This makes the tracker an automatic part of every pipeline run. No more manual i
 
 **What was audited:** 17 distinct scenarios run through the actual `_performance_sheet()` code path with synthesised DB data. Total of 60+ individual cell-value assertions verified across:
 
-| Section | Scenarios checked |
-|---|---|
-| HEADLINE METRICS | TOTAL/CLOSED/OPEN counts; HIT RATE formula = (T1+T2+T3)/closed; SL RATE formula |
-| Outcome breakdown row | All 5 buckets (T1/T2/T3/SL/EXPIRED) count correctly |
-| SPEED METRICS | AVG DAYS → T1/T2/T3/SL formulas; '—' fallback when no closed rows |
-| BY COMPOSITE SCORE BAND | 90+ / 80-89 / 70-79 / <70 boundary behavior at 95, 90, 89.9, 80, 79.9, 70, 69.9 |
-| BY QUICK PICK ARCHETYPE | Multi-archetype grouping including long labels ("DEEP VALUE FALLEN ANGEL") |
-| BY SECTOR | All sectors group correctly; hit-rate cell color thresholds (≥60% green, 40-60% amber, <40% red) |
-| BY TIME HORIZON | SHORT/POSITIONAL/LONG buckets group correctly; empty horizon → "—" group |
-| OPEN POSITIONS | 12-column header; days_left formula; ⚠ flag at boundary (≤14 inclusive) |
-| Approaching-expiry highlight | URGENT (5d), NORMAL (88d), BORDER (exactly 14d) — pale-yellow row + ⚠ flag |
-| End-of-table summary | Approaching-expiry count = 2 when 2 stocks within 14 days |
-| Re-app counter display | "—" for 0, integer for >0 |
-| P&L color coding | green (>0), red (<0), default (=0) |
-| MISSED RUNUP DIAGNOSTIC | AVG / PEAK / count_significant formulas; suppressed at <3 expired; renders at ≥3 |
-| MISSED RUNUP edge cases | Negative max_runup values; mixed positive/negative |
-| Sample-size banner | Amber at <30 closed; green at ≥30 closed |
-| All-loser scenario | 0% hit rate, 100% SL rate, sector cell red |
-| 10K-row scale test | Renders in <1 second; total = 10000 |
-| Robustness | NULL fields, NaN scores, empty strings — graceful, no crash |
-| Day-1 production state | Mirror user's exact 2026-05-08 situation; all fields verified |
+| Section                      | Scenarios checked                                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------------------- |
+| HEADLINE METRICS             | TOTAL/CLOSED/OPEN counts; HIT RATE formula = (T1+T2+T3)/closed; SL RATE formula                   |
+| Outcome breakdown row        | All 5 buckets (T1/T2/T3/SL/EXPIRED) count correctly                                               |
+| SPEED METRICS                | AVG DAYS → T1/T2/T3/SL formulas; '—' fallback when no closed rows                               |
+| BY COMPOSITE SCORE BAND      | 90+ / 80-89 / 70-79 / <70 boundary behavior at 95, 90, 89.9, 80, 79.9, 70, 69.9                   |
+| BY QUICK PICK ARCHETYPE      | Multi-archetype grouping including long labels ("DEEP VALUE FALLEN ANGEL")                        |
+| BY SECTOR                    | All sectors group correctly; hit-rate cell color thresholds (≥60% green, 40-60% amber, <40% red) |
+| BY TIME HORIZON              | SHORT/POSITIONAL/LONG buckets group correctly; empty horizon → "—" group                        |
+| OPEN POSITIONS               | 12-column header; days_left formula; ⚠ flag at boundary (≤14 inclusive)                         |
+| Approaching-expiry highlight | URGENT (5d), NORMAL (88d), BORDER (exactly 14d) — pale-yellow row + ⚠ flag                      |
+| End-of-table summary         | Approaching-expiry count = 2 when 2 stocks within 14 days                                         |
+| Re-app counter display       | "—" for 0, integer for >0                                                                        |
+| P&L color coding             | green (>0), red (<0), default (=0)                                                                |
+| MISSED RUNUP DIAGNOSTIC      | AVG / PEAK / count_significant formulas; suppressed at <3 expired; renders at ≥3                 |
+| MISSED RUNUP edge cases      | Negative max_runup values; mixed positive/negative                                                |
+| Sample-size banner           | Amber at <30 closed; green at ≥30 closed                                                         |
+| All-loser scenario           | 0% hit rate, 100% SL rate, sector cell red                                                        |
+| 10K-row scale test           | Renders in <1 second; total = 10000                                                               |
+| Robustness                   | NULL fields, NaN scores, empty strings — graceful, no crash                                      |
+| Day-1 production state       | Mirror user's exact 2026-05-08 situation; all fields verified                                     |
 
 **Result of audit: ALL 60+ assertions pass.** The Performance sheet rendering code is correct. No values are populated wrongly when given correct DB data.
 
@@ -3267,6 +3333,7 @@ This makes the tracker an automatic part of every pipeline run. No more manual i
 **Fix:** capture `cursor.rowcount` immediately after the gold_recommendations INSERT (before the second INSERT into gold_outcomes overwrites it). Return True only when rowcount==1 (genuine new insertion); return False on collision. Master_funnel hook unchanged — its existing `if insert_gold_recommendation(_rec): _logged += 1; else: _skipped_err += 1` now correctly distinguishes new logs from silent dupes.
 
 **New tests:**
+
 - `test_g12_insert_returns_false_on_duplicate` — locks the rowcount semantics
 - `test_g13_performance_sheet_value_correctness_audit` — runs a synthetic 35-row dataset through the full pipeline and asserts 16 specific calculation invariants. If any formula drifts (someone changes the score band thresholds, the speed metric calculation, the missed-runup formula), this test catches it before a 30-day real-world wait would.
 
@@ -3295,12 +3362,14 @@ The distance percentage updates dynamically each pipeline run as `current_price`
 **Why distance from current, not from entry:** Distance from current is the actionable figure for "where do we go from here." Distance from entry is already implicit in P&L %. Showing both pieces avoids redundancy.
 
 **Visual treatment:**
+
 - SL column: red text (always represents downside risk regardless of current state)
 - T1 / T2 / T3 columns: green text (always represent upside)
 - Subtle text color, not bold — avoids visual overwhelm with 16 columns
 - "—" placeholder shown when level is missing (legacy rows pre-v14.0 might lack levels)
 
 **Column count:** 12 → 16 columns. New full layout:
+
 1. Symbol
 2. Rec Date
 3. Time Horizon
@@ -3377,6 +3446,7 @@ The distance percentage updates dynamically each pipeline run as `current_price`
 **Files changed:** `reporting/excel_generator.py` only. Single-file change.
 
 **Test count after v14.5:** 66 (was 65). New test `test_g14_closed_positions_section_renders_correctly` verifies:
+
 - Section header "CLOSED POSITIONS" present
 - Section appears BEFORE OPEN POSITIONS (chronological reading order)
 - 12-column header with correct labels
@@ -3388,10 +3458,12 @@ The distance percentage updates dynamically each pipeline run as `current_price`
 **Stability:** 5/5 consecutive test runs all 66/66 pass.
 
 **Tooltip + glossary updates:**
+
 - 5 new TIPS entries in `tooltip_formatter.py`: Outcome, Outcome Date, Days to Outcome, Entry CMP, Outcome Price, Max Drawdown %
 - 1 new PERFORMANCE glossary entry: "Closed Positions section" — explains 12-column structure, color-coding, P&L formula, Max Runup interpretation for SL_HIT rows
 
 **Repository hardening (same release, prep for going public):**
+
 - Added `LICENSE` (MIT) — was missing, blocked legitimate use of the public code
 - Added disclaimer block to `readme.md` — educational/research only, not financial advice, no liability
 - Rewrote "Credits & licence" section in readme — removed "Internal use only · confidential · not for redistribution" line that contradicted public visibility
@@ -3421,6 +3493,7 @@ This is too tight for mid/small caps. Typical ATR for SMALL cap = 4% daily. A -7
 6. **Support floor** — SL never placed above nearest support level (support1 from technicals)
 
 **Bounds and discipline:**
+
 - SL clamped to [4.5%, 12.0%] — never tighter than 4.5% (whipsaw protection), never wider than 12% (caps risk per trade)
 - T1 must clear 1.5:1 R:R minimum — even when horizon-cap fires, R:R is preserved
 - T2 ≥ T1 × 1.35, T3 ≥ T2 × 1.35 (spacing rule, relaxes when T3 hits hard cap)
@@ -3433,6 +3506,7 @@ This is too tight for mid/small caps. Typical ATR for SMALL cap = 4% daily. A -7
 **Why not retroactively update existing picks:** The 11 picks are real recorded contracts. Rewriting their SL/T after the fact would destroy outcome-tracking integrity and create credibility damage. The two eras (pre-v14.6 fixed-% picks vs post-v14.6 multi-factor picks) need to coexist so future Performance sheet analysis can compare hit rates between them — that comparison IS the empirical validation of v14.6.
 
 **Files changed:**
+
 - `master_funnel.py` only. Three edits:
   - Edit 1 (line ~1178): added `t.atr_14` to technical_indicators SELECT
   - Edit 2 (line ~1820): tuple unpacking now includes atr_14, stored on stock dict
@@ -3440,6 +3514,7 @@ This is too tight for mid/small caps. Typical ATR for SMALL cap = 4% daily. A -7
   - Edit 4 (line ~2941): replaced fixed-percentage block with call to helper. Preserved `stock.setdefault(...)` semantics — if AI ever provides SL/T values, they still take precedence
 
 **Test count after v14.6:** 67 (was 66). New regression test `test_g15_sl_t_v14_6_multi_factor_formula` with 10 sub-assertions:
+
 - Cap-category sensitivity (LARGE < MID < SMALL SL%)
 - Horizon sensitivity (SHORT < POSITIONAL < LONG SL%)
 - Sector adjustment (HIGH_VOL > LOW_VOL SL%)
@@ -3455,21 +3530,22 @@ This is too tight for mid/small caps. Typical ATR for SMALL cap = 4% daily. A -7
 
 **Before/after preview on user's 11 current open positions** (what v14.6 WOULD produce if they were re-recommended today — the actual frozen values stay at -7%/+12.5%):
 
-| Stock | OLD SL/T1/R:R | NEW SL / T1 / T2 / T3 / R:R |
-|---|---|---|
-| PETRONET | -7.0%/+12.5%/1.79 | -7.0% / +10.4% / +17.4% / +27.8% / 1.50 |
-| ITC | -7.0%/+12.5%/1.79 | **-4.7%** / +18.6% / +32.5% / +46.4% / **3.96** |
-| BSOFT | -7.0%/+12.5%/1.79 | -8.7% / +13.0% / +21.6% / +34.6% / 1.50 |
-| HEXT | -7.0%/+12.5%/1.79 | -5.4% / +8.2% / +13.6% / +21.7% / 1.50 |
-| FIEMIND | -7.0%/+12.5%/1.79 | -7.2% / +10.8% / +18.8% / +26.9% / 1.50 |
-| VIKRAMSOLR | -7.0%/+12.5%/1.79 | **-12.0%** / +18.0% / +30.0% / +48.0% / 1.50 |
-| CIEINDIA | -7.0%/+12.5%/1.79 | -10.3% / +15.4% / +25.7% / +41.0% / 1.50 |
-| KANPRPLA | -7.0%/+12.5%/1.79 | -9.4% / +14.1% / +21.9% / +35.0% / 1.50 |
-| HERITGFOOD | -7.0%/+12.5%/1.79 | -9.7% / +14.6% / +24.3% / +38.9% / 1.50 |
-| AARTISURF | -7.0%/+12.5%/1.79 | **-12.0%** / +18.0% / +30.0% / +48.0% / 1.50 |
-| MARUTI | -7.0%/+12.5%/1.79 | -5.2% / +7.9% / +13.1% / +21.0% / 1.50 |
+| Stock      | OLD SL/T1/R:R     | NEW SL / T1 / T2 / T3 / R:R                                 |
+| ---------- | ----------------- | ----------------------------------------------------------- |
+| PETRONET   | -7.0%/+12.5%/1.79 | -7.0% / +10.4% / +17.4% / +27.8% / 1.50                     |
+| ITC        | -7.0%/+12.5%/1.79 | **-4.7%** / +18.6% / +32.5% / +46.4% / **3.96** |
+| BSOFT      | -7.0%/+12.5%/1.79 | -8.7% / +13.0% / +21.6% / +34.6% / 1.50                     |
+| HEXT       | -7.0%/+12.5%/1.79 | -5.4% / +8.2% / +13.6% / +21.7% / 1.50                      |
+| FIEMIND    | -7.0%/+12.5%/1.79 | -7.2% / +10.8% / +18.8% / +26.9% / 1.50                     |
+| VIKRAMSOLR | -7.0%/+12.5%/1.79 | **-12.0%** / +18.0% / +30.0% / +48.0% / 1.50          |
+| CIEINDIA   | -7.0%/+12.5%/1.79 | -10.3% / +15.4% / +25.7% / +41.0% / 1.50                    |
+| KANPRPLA   | -7.0%/+12.5%/1.79 | -9.4% / +14.1% / +21.9% / +35.0% / 1.50                     |
+| HERITGFOOD | -7.0%/+12.5%/1.79 | -9.7% / +14.6% / +24.3% / +38.9% / 1.50                     |
+| AARTISURF  | -7.0%/+12.5%/1.79 | **-12.0%** / +18.0% / +30.0% / +48.0% / 1.50          |
+| MARUTI     | -7.0%/+12.5%/1.79 | -5.2% / +7.9% / +13.1% / +21.0% / 1.50                      |
 
 Key observations:
+
 - ITC's R:R of 3.96 reflects its 46% CFV upside — formula stretched targets up to match
 - VIKRAMSOLR and AARTISURF (small-cap, neutral sector): wider SL (-12%) gives breathing room against routine volatility
 - Large-cap low-vol stocks (ITC, MARUTI, HEXT): tighter SL (-4.7% to -5.4%)
@@ -3485,13 +3561,9 @@ Key observations:
 **Five enhancements over v14.6 (the A- delta):**
 
 1. **5-tier sector classification** — replaces v14.6 binary HIGH/LOW with very-high (+0.6), high (+0.3), neutral (0), low (-0.2), very-low (-0.35). Defined in `_V14_7_SECTOR_TIER` at master_funnel.py:374+.
-
 2. **ATR-percentile regime detection** — new SELECT subquery fetches AVG(atr_14) over **252 days** as baseline (uses full 400-day price retention, industry-standard 1-trading-year window). Ratio current/baseline classifies: HIGH (≥1.20× baseline → SL widened 10%), LOW (≤0.80× → tightened 10%), NEUTRAL.
-
 3. **Volume-confirmed support** — support1 only used as SL floor when vol_ratio (today's vol / 50-day avg) ≥ 1.20. Filters out random lows with no buying conviction.
-
 4. **Trailing stops** in track_outcomes.py — ratchets at peak gain ≥ +5% (BE), ≥ +10% (+3%), ≥ +15% (+7%). Effective SL = MAX(original, trailing). Zero look-ahead bias: trailing update happens at END of bar (after event check). G17 unit test guards this.
-
 5. **Earnings-near SL widening** — helper accepts days_to_earnings; when 0-5 days, SL widens 20%. Infrastructure ready; data source NOT plumbed (yfinance unreliable for Indian stocks).
 
 **The audit-trail gap fixes (4 confirmed gaps, all closed):**
@@ -3499,11 +3571,8 @@ Key observations:
 User asked "will Performance sheet capture data based on the new change?" Expert audit found 4 silent gaps:
 
 - **Gap 1 — INSERT missing audit columns**: `insert_gold_recommendation()` INSERT statement didn't include 4 new v15.0 columns (original_stop_loss, atr_at_rec, regime_at_rec, next_earnings_date). Schema migration had ADDED the columns but rows were always written with DEFAULT values — audit trail silently lost. Fixed: INSERT now writes all 27 columns including the 4 v15.0 audit fields.
-
 - **Gap 2 — caller dict missing keys**: Even if INSERT supported them, master_funnel.py's `_rec` dict at line ~3569 didn't pass the v15.0 keys. Fixed: dict now includes original_stop_loss, atr_at_rec, regime_at_rec, next_earnings_date sourced from the stock dict (where helper at line 3227-3229 already placed them).
-
 - **Gap 3 — SELECT missing trailing fields**: `get_outcome_stats()` SELECT didn't pull trailing_sl_pct, trailing_sl_price, peak_price_seen from gold_outcomes. Even if the tracker writes them, the Performance sheet couldn't see them. Fixed: SELECT extended to include all three. (Audit columns r.* already covered via wildcard once gap 1 fix populates them.)
-
 - **Gap 4 — Performance sheet not rendering trailing/regime**: OPEN POSITIONS table had 16 columns; trailing-SL state and regime were invisible. Fixed: widened to 18 columns. Added "Trailing" column showing human-readable state (— / BE locked / +3% locked / +7% locked / +X.X% locked) with green text when locked. Added "Regime" column showing HIGH (red) / NEUTRAL / LOW (green). Merge spans (title row + empty-state row + approaching-summary row) all bumped 16→18.
 
 **Tooltips + glossary updates:**
@@ -3512,6 +3581,7 @@ User asked "will Performance sheet capture data based on the new change?" Expert
 - `reporting/excel_generator.py` in-Excel Glossary: 3 new entries added — "v15.0 SL/T derivation methodology", "Trailing Stop logic (v15.0)", "Sector Tier / Regime / Volume confirmation columns".
 
 **Schema migrations (idempotent ALTER TABLE)**:
+
 - gold_recommendations: original_stop_loss, atr_at_rec, regime_at_rec, next_earnings_date
 - gold_outcomes: trailing_sl_pct, trailing_sl_price, peak_price_seen
 
@@ -3522,6 +3592,7 @@ User asked "will Performance sheet capture data based on the new change?" Expert
 **For GitHub Actions DB persistence**: Since DB lives in workflow artifacts (not git), the cleanest wipe path is to delete the `market-data-db` artifact via Actions UI. Next pipeline run won't find it (workflow line 38: `if_no_artifact_found: ignore`), auto-backfill at line 49 rebuilds 400-day daily_prices, gold_recommendations + gold_outcomes stay empty until new picks recommended. Tomorrow's run = clean Day 1.
 
 **Free-tier compatibility verified**:
+
 - Only one new SQL feature (AVG subquery, indexed by symbol+date) — negligible cost.
 - No new external API calls (earnings logic deferred).
 - All new fields optional; missing data falls back gracefully to v14.6 behavior.
@@ -3529,6 +3600,7 @@ User asked "will Performance sheet capture data based on the new change?" Expert
 - GitHub Actions public repo: unlimited storage + minutes.
 
 **Test changes:**
+
 - v14.6 had 67 tests. v15.0 has **70** (+3).
 - G16: 5-tier + regime + volume confirmation + earnings widening (4 sub-assertions).
 - G17: trailing-stop ratcheting + no-lookahead (2 scenarios).
@@ -3536,6 +3608,7 @@ User asked "will Performance sheet capture data based on the new change?" Expert
 - 5/5 consecutive runs all 70/70 green.
 
 **Files changed:**
+
 - `master_funnel.py` (252-day baseline; 3 new audit fields on stock dict; _rec dict updated)
 - `track_outcomes.py` (trailing-SL ratchet with no-lookahead discipline)
 - `database/data_bridge.py` (schema migrations + INSERT 27 cols + SELECT 3 trailing cols + update_outcome signature)
@@ -3551,39 +3624,50 @@ User asked "will Performance sheet capture data based on the new change?" Expert
 ## v15.x evolution post-v15.0 (the path to A-)
 
 ### v15.0.1 — Calendar-day precision fix
+
 SQLite `date(X, '-N days')` subtracts CALENDAR days. v15.0's `'-252 days'` captured only ~180 trading days. Widened: 252→365 for baseline ATR, 50→70 for vol_50. 52w high/low correctly stays at 365 cal (industry definition). Files: master_funnel.py only.
 
 ### v15.1 — SL_MAX 12% → 15%
+
 Production audit: 44/100 stocks collapsed at -12% SL cap, masking per-stock differentiation. Raised `_V14_6_SL_MAX_PCT` to 15.0. Stocks at cap dropped 44→24; SL distribution gained 32 unique values; mean Score 51.2→54.6. New G19 test. **71/71 tests**.
 
 ### v15.2 — Historical ATR backfill + ETF filter expansion
+
 Two production issues:
+
 1. Regime detection always NEUTRAL because backfill wrote only LATEST TI row → baseline ATR query had 1 row. Fix: `compute_historical_atr_series()` walks 400 days, writes ~280K historical atr_14 rows. Regime now real from Day 1.
 2. 18 ETFs (MOTOUR, MOSILVER, GROWWLIQID, etc.) leaked into dashboard with empty fundamentals. Fix: 17 specific symbol keywords + company-name-based detection ("MUTUAL FUND", "ASSET MANAGEMENT", "INDEX FUND"). Did NOT add broad prefixes (would false-positive MOIL, MOSCHIP, HDFCAMC parent co). 18/18 blocked, 0 false positives.
-Requires artifact deletion for historical ATR to populate. New G20 test. **72/72 tests**.
+   Requires artifact deletion for historical ATR to populate. New G20 test. **72/72 tests**.
 
 ### v15.2.1 — NSE pledge log cleanup (cosmetic)
+
 NSE pledge endpoint returns HTTP 404 on cloud-provider IPs (GitHub Actions, AWS, Azure). Reduced from 4 noisy log lines (3 retries + summary) to 1 honest line: "free endpoint unavailable on this IP (known limitation; paid-tier fallback expected)". Behavior unchanged.
 
 ### v15.3 — Phases 1-4 institutional enhancements
+
 - **Phase 1 (kept)**: NSE trading-day calendar — exact 252-trading-day cutoffs via `market_holidays` table. Falls back to v15.0.1 calendar-day approximation if calendar empty (first-run safety). New module `ingestion/trading_day_calendar.py`.
 - **Phase 2 (withdrawn in v15.4)**: tax-aware T1/T2/T3 nudge — turned out to be institutionally incorrect.
 - **Phase 3 (kept)**: backtest infrastructure — standalone CLI `backtest/walk_forward.py`. Refuses calibration below N=30 (statistical hygiene).
 - **Phase 4 (replaced in v15.4)**: correlation-aware sizing — initial linear penalty replaced with risk parity.
 
 ### v15.4 — Institutional-correctness audit
+
 User challenged: "are your enhancements inline with top-tier institutional approach?"
+
 - **Phase 2 withdrawn**: Inflating T1/T2/T3 by ~5% to compensate for STCG would have harmed hit rate by ~17 percentage points on a typical LARGE CAP (the climb from +12% to +17.6% halves win probability). Institutions handle tax at portfolio level (loss harvesting, LTCG timing), not by inflating exit targets.
 - **Phase 4 replaced** with institutional **volatility-adjusted risk parity** (Markowitz 1952; Bridgewater All-Weather; SEBI-RIA norm):
+
   ```
   position_size = risk_budget / |SL_pct|
   × cap-category multiplier (LARGE 1.0, MID 1.0, SMALL 0.85, MICRO 0.70)
   Hard 30% sector exposure cap
   Clamps: [1%, 15%]
   ```
+
   **Invariant**: every position contributes ~1% portfolio risk regardless of stock volatility. Phases 1 + 3 kept. G21 rewritten. **73/73 tests**.
 
 ### v15.5 — Risk-parity wired to Excel + Performance tooltip audit + band schema fix
+
 - Surfaces v15.4 risk-parity sizing into Full Dashboard + Gold sheets as 2 new columns: "Suggested Alloc %" (e.g., 12.5%) and "Sizing Rationale" (e.g., "Risk parity: 1.0% / 8.0% = 12.50%"). FULL_COLS 124→126; GOLD_COLS 41→43.
 - **Band schema fix**: discovered FULL_GROUPS/GOLD_GROUPS schema was `(start_col, name, color, span)`, not `(end_col, ...)`. Initial v15.5 draft caused 9 MergedCell errors due to overlapping bands. Fixed.
 - **Performance sheet tooltip audit**: added 7 missing tooltips (Rec Date, Re-app, CMP at Rec, Current Price, P&L %, Score, ⚠), wired `_apply_col_tips` on both OPEN and CLOSED POSITIONS header rows. All 18 OPEN + 12 CLOSED columns now have hoverable tooltips.
@@ -3592,13 +3676,16 @@ User challenged: "are your enhancements inline with top-tier institutional appro
 - **74/74 tests** across 5/5 runs.
 
 ### v15.6 — Pre-existing test failures fixed + documentation sync
+
 - Discovered v15.5 had introduced band-schema overlap causing 9 MergedCell errors. Fixed by aligning FULL_GROUPS/GOLD_GROUPS values: TRADE PLAN at start=113 (Full Dashboard) / start=32 (Gold), span=9 cols. Sum of band spans now equals len(FULL_COLS)=126 and len(GOLD_COLS)=43.
 - Completed v15.5 Performance sheet tooltip work — all 18 OPEN + 12 CLOSED columns have hoverable ⓘ tooltips and the underlying `_apply_col_tips` wiring.
 - Documentation sync: readme.md + CLAUDE.md updated with v15.0.1 → v15.5 entries (previously stopped at v14.6 / v15.0).
 - **74/74 tests** across 5/5 runs.
 
 ### v15.7 — Minor cleanups: rationale text + Glossary dedup + Performance +2 cols
+
 Three issues surfaced in v15.6 production audit:
+
 1. **Sizing Rationale text bug** (ITC scenario): when a stock was already an OPEN position in its own sector, `_current_sector_exposure()` counted that stock against itself, falsely triggering the "sector cap" rationale branch. The actual binding constraint was MAX_ALLOCATION clamp (15%). Allocation value was correct; only the rationale text was misleading. Fix: only emit "sector cap" text when `headroom_in_sector < MAX_ALLOCATION_PCT`.
 2. **Glossary dedup**: duplicate "Suggested Alloc %" / "Sizing Rationale" entries (rows 87-88 + 155-156). Kept cleaner non-suffixed entries.
 3. **Performance OPEN POSITIONS extended 18→20 cols**: added "Suggested Alloc %" + "Sizing Rationale" to Performance sheet (they were on Full Dashboard / Gold but missing from Performance — the daily-check view). Schema migration: `gold_recommendations.suggested_alloc_pct REAL`, `alloc_rationale TEXT`. master_funnel `_rec` dict + INSERT updated. `get_outcome_stats()` uses `r.*` wildcard so auto-picks up new columns. Legacy OPEN rows (pre-v15.7 schema) render "—" in new cols — correct backward-compat.
@@ -3606,6 +3693,7 @@ Three issues surfaced in v15.6 production audit:
 **New G23 test** locks: rationale-text correctness, glossary dedup, Performance col count = 20, schema migration present, INSERT extension, `_rec` dict has new keys. **75/75 tests** across 5/5 runs.
 
 ### v15.8 — Post-enrichment ETF filter with AMC-parent carve-out
+
 13 May 2026 production audit: **12 ETFs leaked** into the Full Dashboard despite the v15.2 filter.
 
 **Root cause**: NSE bhavcopy doesn't populate descriptive company names — only tickers. The v15.2 name-marker filter in pre_screener.py runs BEFORE enrichment, when `company_name` is empty → markers like " ETF" / "MUTUAL FUND" never match → ETFs slip through.
@@ -3630,6 +3718,7 @@ Stage 2 — SOFT-AMC markers ("ASSET MANAGEMENT", "ASSET MGMT"):
 ```
 
 **AMC parents preserved** (publicly-listed real operating businesses):
+
 - HDFCAMC — HDFC Asset Management Company Limited
 - NAM-INDIA — Nippon Life India Asset Management Limited
 - UTIAMC — UTI Asset Management Company Limited
@@ -3642,6 +3731,7 @@ Filtered stocks get sentinel flag `_v158_etf_filtered=True` + `verdict='FILTERED
 **New G24 test** verifies: 11 confirmed leakers BLOCKED, 4 AMC parents ALLOWED, 3 legacy ETFs (NIFTYBEES/GOLDBEES/LIQUIDBEES) still BLOCKED, HSBC edge case correct, filter wired. **76/76 tests** across 5/5 runs.
 
 ### v15.8.1 — HOTFIX for v15.8 indentation bug
+
 User reported Gold sheet went BLANK (4 picks → 0 picks) after v15.8 deploy. Investigation: comparing pre-v15.8 vs post-v15.8 Excels for SAME stocks on SAME date showed scores systematically dropped (OMFREIGHT 100→97.5, ITC 80→76.8, BSOFT 76.7→68). CMP identical — meaning code change, not market variation.
 
 **Root cause**: v15.8 ETF-filter insertion accidentally orphaned the EPS/mcap/PE parsing block. Originally inside `if sym in _sm_map:` at indent 16, the parsing block ended up at indent 16 INSIDE `if _hit_marker:` AFTER a `continue` statement. Result: parsing block became DEAD CODE that never ran for ANY stock. EPS/mcap/PE stayed at 0 → P/E and Altman Z calculations broken → Score / Storm / Spike all dropped just enough to fail strict 11-criteria Gold gate.
@@ -3649,11 +3739,13 @@ User reported Gold sheet went BLANK (4 picks → 0 picks) after v15.8 deploy. In
 **Fix**: restored EPS/mcap parsing block to its original location inside `if sym in _sm_map:`. v15.8 ETF filter preserved. **New G25 test** locks the structural invariant — verifies parsing block at indent 16, no orphaning `continue` before it, v15.8 filter sits AFTER parsing. **77/77 tests** across 5/5 runs.
 
 ### v15.9 — Tooltip context-correctness audit + fixes
+
 User reported incorrect tooltip text on Performance sheet CLOSED POSITIONS column 'P&L %': "Current unrealized return... trade in progress" — wrong because CLOSED positions are FINAL realised outcomes.
 
 **Root cause**: TIPS dict is keyed by header name. The same header name appears in BOTH OPEN POSITIONS (where 'unrealized', 'in progress' is correct) AND CLOSED POSITIONS (where 'realised', 'final outcome' is correct). Pre-v15.9 tooltips assumed only OPEN context.
 
 **Fixed 6 shared-header tooltips**:
+
 - **P&L %** — bullet points for OPEN (unrealized return, tracker logic) and CLOSED (realised return)
 - **Max Runup %** — QUICK READ rewritten neutral; DETAIL clarifies OPEN vs CLOSED
 - **Max Drawdown %** + 'Max DD %' alias — same neutral pattern
@@ -3666,9 +3758,11 @@ User reported incorrect tooltip text on Performance sheet CLOSED POSITIONS colum
 **New G26 test** verifies all 6 shared-header tooltips correctly mention BOTH contexts and use canonical terminology. **78/78 tests** across 5/5 runs.
 
 ### v16.0 — Institutional risk-adjusted metrics + DD-duration tracking + survivorship audit
+
 First "Option A+B" of the free-tier improvement plan from the project-rating discussion. Three institutional-grade additions, all free-tier compatible (no paid data, no external services).
 
 **Item 1: Sharpe / Sortino / Calmar reporting**
+
 - New module: `analysis/risk_metrics.py` — pure-Python (math module only), zero external deps
 - Sharpe: annualized `(mean − rf) / σ × √(252/avg_days)`. Risk-free rate = 6.5% (India 91-day T-bill).
 - Sortino: same numerator, downside-only std denominator.
@@ -3678,19 +3772,22 @@ First "Option A+B" of the free-tier improvement plan from the project-rating dis
 - Performance sheet: new "RISK-ADJUSTED RETURNS" section between CLOSED and OPEN POSITIONS. 8-metric ratios row + 8-metric supporting-stats row + empty-state handling.
 
 **Item 2: Max DD Duration tracking**
+
 - Schema migration: `gold_outcomes.dd_duration_days INTEGER` + `dd_recovered INTEGER` (additive ALTER TABLE, idempotent).
-- Tracker state machine in `_walk_forward`: close-to-close underwater-run counter, reset on recovery, longest-run captured. 
+- Tracker state machine in `_walk_forward`: close-to-close underwater-run counter, reset on recovery, longest-run captured.
 - Persisted via extended `update_outcome()` signature.
 - `get_outcome_stats` SELECT pulls new columns (INNER JOIN).
 - Rendered as Avg DD Duration + Recovery Rate alongside Sharpe/Sortino/Calmar.
 
 **Item 5: Survivorship bias audit**
+
 - New module: `analysis/survivorship_audit.py` — cross-checks OPEN gold positions against today's `latest_analysis_results` universe.
 - 5 status branches: CLEAN (green ✓), STALE_FOUND (amber ⚠), NO_OPEN_POSITIONS (neutral), UNIVERSE_UNAVAILABLE (grey), ERROR (red).
 - Performance sheet renders the audit line + explanatory caption at the end.
 - Detects stocks delisted / suspended / symbol-changed while in OPEN portfolio.
 
 **3 new regression tests**:
+
 - G27: Sharpe/Sortino/Calmar math correctness (synthetic 4-trade case + 6 edge cases)
 - G28: DD-duration tracker state machine structurally verified (variables present, reset-on-recovery, 6 return-dict sites populate fields, schema/update_outcome/SELECT all wired)
 - G29: Survivorship audit handles all 5 status branches + graceful missing-DB
@@ -3698,7 +3795,9 @@ First "Option A+B" of the free-tier improvement plan from the project-rating dis
 **81/81 tests** across 5/5 stability runs.
 
 ### Grade impact assessment
+
 Per the institutional-rating analysis from this session, v16.0 changes are:
+
 - Performance Attribution: C → **B+** (immediate)
 - Risk Management Framework: A- → **A** (immediate)
 - Documentation: A → **A+** (immediate)
@@ -3709,12 +3808,14 @@ Per the institutional-rating analysis from this session, v16.0 changes are:
 The v16.0 infrastructure means that as soon as data accumulates, the metrics populate automatically — no further code work needed for the empirical-validation jump.
 
 ### Test count evolution
+
 - v14.5: 66 → v14.6: 67 → v15.0: 69 (G16+G17) → v15.1: 71 (G18+G19)
 - v15.2: 72 → v15.3: 73 → v15.4: 73 → v15.5: 74 (G22)
 - v15.6: 74 → v15.7: 75 (G23) → v15.8: 76 (G24) → v15.8.1: 77 (G25)
 - v15.9: 78 (G26) → **v16.0: 81 (G27 + G28 + G29)**
 
 ### Honest grade after v16.0: A- today, A in ~60-90 days
+
 **What changed since v15.0**: trading-day calendar precision (Phase 1), backtest infrastructure (Phase 3), institutional risk-parity sizing (Phase 4 + v15.5), Performance sheet completeness (v15.5-v15.7), ETF filter robustness (v15.8 + v15.8.1 hotfix), tooltip context-correctness (v15.9), risk-adjusted metrics + DD duration + survivorship audit (v16.0).
 
 **Path to true A+**: cannot reach on free tier. Requires (a) walk-forward backtest with 60-90 days of data — now achievable, (b) independent code review by external quant — needs people, not code, (c) execution-cost modeling with real broker fills — needs paid data. v16.0 closes the code gaps that are fixable on free tier.
@@ -3726,6 +3827,7 @@ User flagged SONAMLTD admitted to Gold on 14 May 2026 — passed all 11 mechanic
 **Why Option A (method-agreement) was rejected**: Empirical analysis on 7 real Gold picks showed SONAMLTD's 50% method-agreement was identical to KOVAI's 50% and higher than ITC's 42.9%. There is no threshold of method-agreement that catches SONAMLTD while keeping the known good picks. Option A is a poorly-aimed filter because the 7 valuation methods (DCF/Graham/PE/PB/EV/DDM/PEG) inherently measure different things — wide spreads are normal even for healthy stocks.
 
 **Option B (Quality Floor) — calibrated thresholds**:
+
 - **ROE ≥ 10%** (or missing/None passes)
   - Catches SONAMLTD (9.5%)
   - Preserves ITC (29%), KOVAI (19.7%), BSOFT (13.4%), CIEINDIA (11.6%)
@@ -3738,6 +3840,7 @@ User flagged SONAMLTD admitted to Gold on 14 May 2026 — passed all 11 mechanic
 Both gates permissive on missing data — small caps without ratios pass, since Altman / BS Health / Int Coverage gates already cover them.
 
 **Excel version-history cleanup** (per project policy):
+
 - Removed `· v16.0` markers from "RISK-ADJUSTED RETURNS" and "SURVIVORSHIP AUDIT" section headers
 - Removed `v15.0:` marker from "CLOSED POSITIONS" header
 - Removed `v6.2` marker from Glossary header
@@ -3745,16 +3848,19 @@ Both gates permissive on missing data — small caps without ratios pass, since 
 - Internal docs (readme.md, CLAUDE.md, CHANGES.md) continue tracking full history
 
 **Documentation updates**:
+
 - Glossary entries for "ROE %" and "PEG Ratio" updated with Gold-tier gate role
 - Tooltip quick-reads for ROE and PEG updated to mention "disqualifies from Gold tier"
 - Gold criteria header text: "ALL 11 must pass" → "ALL 13 must pass"
 
 **Real-data validation (empirical)**:
+
 - 13 May 2026: v16.0 admits 3 (ITC, KOVAI, BSOFT) → v16.2 admits 3 (same — no change)
 - 14 May 2026: v16.0 admits 3 (SONAMLTD, INDUSTOWER, CIEINDIA) → v16.2 admits 1 (CIEINDIA only)
 - Net effect: 2 bad-quality picks correctly dropped across both days, all 4 quality picks preserved
 
 **New G30 regression test** (9 structural invariants):
+
 - Threshold constants present (10, 8)
 - Permissive-on-missing logic verified (.isna() in both gates)
 - Mask wires _roe_gate and _peg_gate
@@ -3768,6 +3874,7 @@ Both gates permissive on missing data — small caps without ratios pass, since 
 **82/82 tests** across 5/5 stability runs.
 
 ### Test count evolution
+
 - v14.5: 66 → v14.6: 67 → v15.0: 69 → v15.1: 71 → v15.2: 72
 - v15.3: 73 → v15.4: 73 → v15.5: 74 → v15.6: 74 → v15.7: 75 (G23)
 - v15.8: 76 (G24) → v15.8.1: 77 (G25) → v15.9: 78 (G26)
@@ -3776,6 +3883,7 @@ Both gates permissive on missing data — small caps without ratios pass, since 
 (Note: v16.1 was designed but never shipped — empirical analysis showed Option A as designed was ineffective. v16.2 is the production successor with calibrated Option B only.)
 
 ### Honest grade after v16.2: still A− today, A in ~60-90 days
+
 The gate-tightening makes the screener more institutionally credible (no longer admitting low-ROE, high-PEG picks) but doesn't accelerate the empirical-validation timeline. Still needs 30+ closed positions for Sharpe to become statistically meaningful.
 
 **Trade-off acknowledged**: v16.2 will produce empty-Gold days more often than v16.0, but ONLY when fundamentals are weak market-wide. This is the right institutional behavior — "no picks meet our criteria today" is better than admitting borderline picks just to fill the sheet.
@@ -3785,18 +3893,21 @@ The gate-tightening makes the screener more institutionally credible (no longer 
 User reported header-text overlap in Performance sheet (Days Held / Days Left / Re-app / Score columns crowded). Root cause: many columns sized below width 10, which doesn't fit headers like "Days Held ⓘ", "Storm /10 ⓘ", "RSI (14) ⓘ" — the ⓘ tooltip cue plus header text overflows.
 
 **Width fixes across 4 column tables**:
+
 - **Performance OPEN POSITIONS**: Days Held 10→12, Days Left 10→12, Re-app 8→10, Score 8→10, plus minor bumps on Regime, Current Price, Max Runup %, Suggested Alloc %, Sizing Rationale
 - **Performance CLOSED POSITIONS**: aligned shared-column widths with OPEN to eliminate the OPEN-overrides-CLOSED conflict on the same sheet (Symbol, Rec Date, Time Horizon must match)
 - **GOLD_COLS**: all ratio columns widened from 9→11 (Spike, Storm, P/E, PEG, ROE, D/E, RSI)
 - **FULL_COLS**: all narrow ratio + technical-indicator columns widened from 8/9 to 11 (Beta, P/E TTM, P/CF, P/B, P/S, ROE%, ROCE%, ROA%, NPM%, FII%, DII%, Altman Z, Beneish M, ADX, RSI, Stoch %K, MFI)
 
 **HTML pipeline reference** (`pipeline_reference.html`, renamed from `pipeline_reference_v15_0.html`):
+
 - Title: "Pipeline Reference (v15.0)" → "Pipeline Reference (v16.3)"
 - Meta line rewritten with full post-v15.0 enhancement summary
 - Gold-tier filter SVG section updated from "ALL 11 conditions must pass" to "ALL 13 conditions must pass" with criteria 12 (ROE ≥ 10%) and 13 (PEG ≤ 8) listed
 - Footer rewritten with layer-by-layer summary covering v15.5 / v15.7 / v15.8 / v15.9 / v16.0 / v16.2 / v16.3
 
 **New G31 regression test** (4 structural invariants):
+
 - FULL_COLS minimum width ≥ 10
 - GOLD_COLS minimum width ≥ 10
 - Performance OPEN POSITIONS narrow columns widened
@@ -3805,12 +3916,14 @@ User reported header-text overlap in Performance sheet (Days Held / Days Left / 
 **83/83 tests** across 5/5 stability runs.
 
 ### Test count evolution
+
 - v14.5: 66 → v14.6: 67 → v15.0: 69 → v15.1: 71 → v15.2: 72
 - v15.3: 73 → v15.4: 73 → v15.5: 74 → v15.6: 74 → v15.7: 75 (G23)
 - v15.8: 76 (G24) → v15.8.1: 77 (G25) → v15.9: 78 (G26)
 - v16.0: 81 (G27 + G28 + G29) → v16.2: 82 (G30) → **v16.3: 83 (G31)**
 
 ### Honest grade after v16.3: still A− today
+
 v16.3 is a cosmetic / documentation update. No change to data flow, scoring, filtering, or schema. The grade trajectory remains the same: A− today, A in ~60-90 days as closed positions accumulate enough for Sharpe to become statistically meaningful.
 
 ### v16.4 — Beneish M anti-trigger threshold recalibration (-2.22 → -1.78)
@@ -3818,6 +3931,7 @@ v16.3 is a cosmetic / documentation update. No change to data flow, scoring, fil
 User audit on 15 May 2026 surfaced false-positive Gold exclusions. MAYURUNIQ (Score 99.7, DEEP VALUE EARLY MOVER) and DRREDDY (Score 78.4, DEEP VALUE) were excluded from Gold despite passing every fundamental + technical quality gate. Trace revealed both were flagged by the v12.9 anti-trigger guard for Beneish M > -2.22 (MAYURUNIQ M=-1.80, DRREDDY M=-1.96).
 
 **Beneish (1999) defines TWO thresholds in the original M-Score paper**:
+
 - **M > -2.22** = "possible manipulator" (50%+ probability) — looser cutoff
 - **M > -1.78** = "likely manipulator" (80%+ probability) — stricter cutoff
 
@@ -3826,6 +3940,7 @@ Pre-v16.4 used the looser -2.22. The Beneish model has known false-positive bias
 **The Beneish FORMULA itself (v12.9 real 8-variable implementation) is unchanged**. Only the admission threshold is raised.
 
 **Threshold updated at 3 sites consistently**:
+
 - `screening/pre_screener.py` Rule 3 (primary anti-trigger guard at ~line 289)
 - `master_funnel.py` v12.9 refresh block (post-Section 5A.5 fresh-forensics re-evaluation at ~line 3116)
 - All documentation: `tooltip_formatter.py` (Beneish M long-tooltip + Spike Score tooltip), `excel_generator.py` (glossary entry + TIPS dict)
@@ -3841,12 +3956,14 @@ Pre-v16.4 used the looser -2.22. The Beneish model has known false-positive bias
 **84/84 tests** pass across 5/5 stability runs. `test_v11.0.2` baseline unchanged at 538 passed (4 pre-existing DUAL_LISTED failures unrelated to v16.4) — Beneish FORMULA tests in Group 59 correctly retain -2.22 references because they test formula output values, not gate thresholds.
 
 ### Test count evolution
+
 - v14.5: 66 → v14.6: 67 → v15.0: 69 → v15.1: 71 → v15.2: 72
 - v15.3: 73 → v15.4: 73 → v15.5: 74 → v15.6: 74 → v15.7: 75 (G23)
 - v15.8: 76 (G24) → v15.8.1: 77 (G25) → v15.9: 78 (G26)
 - v16.0: 81 (G27 + G28 + G29) → v16.2: 82 (G30) → v16.3: 83 (G31) → **v16.4: 84 (G32)**
 
 ### Honest grade after v16.4: still A− today
+
 v16.4 is a CALIBRATION fix that prevents quality picks from being false-positive-filtered. It doesn't change grade trajectory — A− today, A in 60-90 days as closed positions accumulate. But it does improve the *daily output quality*: MAYURUNIQ and DRREDDY now appear in Gold where they belong, instead of being silently lost to an over-strict academic threshold. Net effect: more high-conviction picks available for the user to consider, fewer "where did that good stock go?" moments.
 
 **Caveat acknowledged**: Beneish at -1.78 is still a noisy signal for newly-listed / high-growth small-caps. Other gates (Altman Z, BS Health, ROE quality floor, PEG, Earnings Quality) provide independent forensic protection. Stocks with M > -1.78 still get flagged — this is genuine high-confidence manipulation-risk territory.
@@ -3859,6 +3976,7 @@ User spotted KOVAI in CLOSED POSITIONS as SL_HIT with +0.0% P&L and Outcome Pric
 
 **Part 1 — break-even activation recalibrated +5% → +10%**
 Old tiers (≥15%→lock+7%, ≥10%→lock+3%, ≥5%→break-even) replaced with:
+
 - peak ≥ 25% → lock +12%
 - peak ≥ 20% → lock +9%
 - peak ≥ 15% → lock +5%
@@ -3866,11 +3984,13 @@ Old tiers (≥15%→lock+7%, ≥10%→lock+3%, ≥5%→break-even) replaced with
 - peak < 10% → no trailing stop (original SL still protects)
 
 **Part 2 — distinct TRAIL_SL outcome type**
+
 - `SL_HIT` = original stop breached (real loss, thesis failed)
 - `TRAIL_SL` = trailing stop hit after a favourable run (risk control, P&L ≥ 0)
 - Discriminator: `trailing_sl_price > 0 AND trailing_sl_price >= original_sl AND effective_sl == trailing_sl_price`
 
 **Stat-separation (the key user requirement)**: TRAIL_SL is fully separated from SL_HIT in EVERY aggregation:
+
 - SL-rate numerator = n_sl ONLY (TRAIL_SL excluded — verified by G33 assertion `"n_sl + n_tr" not in src`)
 - Separate headline tiles: "SL HIT" (n_sl) vs "TRAIL SL" (n_tr)
 - Separate breakdown-table columns: "SL Hits" vs "Trail SL"
@@ -3887,20 +4007,24 @@ Old tiers (≥15%→lock+7%, ≥10%→lock+3%, ≥5%→break-even) replaced with
 **New G33 regression test** — 10 invariants including 2 functional simulations and explicit stat-separation assertions. **85/85 tests** across 5/5 stability runs.
 
 ### Test count evolution
+
 - v14.5: 66 → … → v16.0: 81 (G27+G28+G29) → v16.2: 82 (G30)
 - v16.3: 83 (G31) → v16.4: 84 (G32) → **v16.5: 85 (G33)**
 
 ### Honest accounting
+
 This pre-existing v15.0 bug sat through every release including the v16.0 outcome-tracking work and was never caught until the user spotted the anomalous CLOSED entry. That is a multi-session miss on the assistant's part — NOT a v16.4 regression. The user's instinct to compare before/after Excel files was exactly the right diagnostic move.
 
 ### Honest grade after v16.5: still A− today
+
 v16.5 fixes a real correctness bug in outcome tracking — it doesn't accelerate the empirical-validation timeline, but it makes the track record HONEST (no more false break-even closes mislabeled as stop-losses polluting the SL-rate). Grade trajectory unchanged: A− today, A in 60-90 days as genuine closed positions accumulate.
 
 ### Honest grade after v17.3: A- today
+
 v17.3 does not improve returns and should not be read as if it does. What it changes is that a previously INVISIBLE question became measurable. The T2 and T3 tiles were structurally incapable of ever showing a non-zero value, so for 31 closed positions the dashboard reported "0 T2 hits" when the honest statement was "T2 was never tested" - the tracker is first-event-wins and closed every position at T1 before T2 could be evaluated. Continuation tracking replaces a misleading zero with a real measurement. Whether T1 is placed well is now an empirical question rather than an assumption. But the answer needs roughly 30 completed continuation rows before it means anything, and there are 13 today. Grade trajectory unchanged: A- today, A once genuine closed positions accumulate.
 
 **Documentation debt acknowledged.** v17.0, v17.1, v17.1.1 and v17.2 all shipped to production without entries in this file or in `readme.md` - both sat at v16.5 while four releases went live. v17.3 is documented here, but the gap is real and should be backfilled: the market-regime gate, the 3d-ROC momentum gate, the sector-cycle gate, the horizon-key fix (which had silently defaulted every stock to POSITIONAL since v14.6, leaving all horizon-specific SL/T1/T3 logic inert), the three unconditional column-width sites, and the Alert Log SCORE DEGRADED semantics are all undocumented here.
 
 ---
 
-*Last updated: July 21, 2026 · v17.3 · Maintained by: Rajkumar + Claude (Anthropic) working sessions*
+*Last updated: September 12, 2026 · v17.8.1 · Maintained by: Rajkumar + GitHub Copilot working sessions*

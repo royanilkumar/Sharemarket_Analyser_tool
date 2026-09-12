@@ -16,6 +16,8 @@ Handles:
 import sqlite3
 import pandas as pd
 
+from database.migrations import run_migrations
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 1 — TABLE INITIALISATION
@@ -24,6 +26,7 @@ import pandas as pd
 def initialize_v7_tables(conn):
     """Creates all v7 tables if they don't exist. Safe to call every run."""
     c = conn.cursor()
+    run_migrations(conn)
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS daily_prices (

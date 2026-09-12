@@ -1,0 +1,4 @@
+{"timestamp": "2026-09-12T04:52:39+00:00", "level": "INFO", "logger": "sharemarket.pipeline", "message": "pipeline_started", "run_id": "20260912T045239Z", "stage": "pipeline", "status": "started"}
+{"timestamp": "2026-09-12T04:52:40+00:00", "level": "INFO", "logger": "sharemarket.pipeline", "message": "stage_completed", "run_id": "20260912T045239Z", "stage": "gate", "status": "completed"}
+{"timestamp": "2026-09-12T04:55:08+00:00", "level": "INFO", "logger": "sharemarket.pipeline", "message": "screening_completed", "run_id": "20260912T045239Z", "stage": "screening", "status": "completed", "rows": 100}
+{"timestamp": "2026-09-12T05:06:28+00:00", "level": "INFO", "logger": "sharemarket.pipeline", "message": "pipeline_completed", "run_id": "20260912T045239Z", "stage": "pipeline", "status": "completed"}

@@ -25,10 +25,10 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -39,7 +39,7 @@ jobs:
 
       - name: Restore market_data.db from artifact
         continue-on-error: true
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v24
         with:
           name: market-data-db
           path: .
@@ -256,7 +256,7 @@ jobs:
 
       - name: Save market_data.db as artifact
         if: hashFiles('market_data.db') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: market-data-db
           path: market_data.db

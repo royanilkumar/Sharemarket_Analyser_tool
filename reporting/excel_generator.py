@@ -17,6 +17,7 @@ from reporting.tooltip_formatter import (
     apply_group_tooltips as _tt_apply_groups,
     build_reference_sheet as _tt_build_ref,
 )
+from utils.metric_state import parse_metric
 
 NAVY  = "1E293B";  WHITE = "FFFFFF";  LG = "F8FAFC"
 
@@ -1192,12 +1193,8 @@ NO_FREE_SOURCE_COLS = {
 NEEDS_AI_CREDITS = {"View Analysis Summary"}
 
 def _sf(val, default=0.0):
-    if val is None or val == "" or str(val) in ("—", "--", "N/A"):
-        return float(default)
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return float(default)
+    metric = parse_metric(val, source="excel")
+    return metric.value if metric.is_available else float(default)
 
 
 def _f(h): return PatternFill("solid", fgColor=h)
@@ -3221,7 +3218,7 @@ class ExcelGeneratorV6:
             ws.row_dimensions[next_row].height = 22
             next_row += 1
 
-            _sh_cols = [("Symbol",14),("Horizon",13),("Real Outcome",15),
+            _sh_cols = [("Symbol",14),("Time Horizon",13),("Real Outcome",15),
                         ("Real P&L %",12),("Shadow Outcome",16),("Shadow P&L %",13),
                         ("Difference",12),("Cur. Shadow Stop",16),("Regime",10)]
             for ci,(h,w) in enumerate(_sh_cols,1):

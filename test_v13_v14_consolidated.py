@@ -1,5 +1,5 @@
 """
-NSE/BSE Sharemarket Analyser — Consolidated Regression Test Suite (v13.x → v14.3)
+NSE/BSE Sharemarket Analyser — Consolidated Regression Test Suite (v13.x → v17.8.1)
 ================================================================================
 
 Single test file replacing 6 previous separate test scripts. Run from repo root:
@@ -16,7 +16,7 @@ every test passes. Test groups (run in order):
   · v14_0    (17 tests) — v14.0 outcome tracking — schema, walk-forward, Performance sheet, tooltips
   · v14_1    (19 tests) — v14.1+v14.1.2+v14.1.3+v14.3 — horizon-aware expiry, hook-ordering, tracker integration, INSERT collision detection, audit
 
-  Total: 65 regression tests · zero shared mutable state between tests
+    Total: 91 regression tests · zero shared mutable state between tests
 
 What this suite does NOT cover (kept as separate files in repo by design):
   · test_v11.0.2_full_withdummies.py — ScoringEngine integration suite (269 KB,
@@ -25,18 +25,26 @@ What this suite does NOT cover (kept as separate files in repo by design):
   · test_yfinance.py                  — external-API diagnostic
 """
 
-import sys, os, sqlite3
+import sys, os, sqlite3, glob, tempfile, uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 import pandas as pd
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 # Project root must be importable
 # When run from repo root, '.' is sys.path[0] already; this is for safety.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
-# Also add /home/claude/proj for development environment
-if os.path.isdir('/home/claude/proj'):
-    sys.path.insert(0, '/home/claude/proj')
+_REPO_ROOT = Path(_HERE)
+_TEST_TMP = Path(tempfile.gettempdir()) / "sharemarket_analyser_tests"
+_TEST_TMP.mkdir(parents=True, exist_ok=True)
+
+# Tests use repository-relative source files regardless of the caller's CWD.
+os.chdir(_REPO_ROOT)
 
 # Project imports needed by tests at function level — surfaced here so all
 # tests can use them without re-importing in each function body.
@@ -50,14 +58,15 @@ from analysis.scoring_engine import ScoringEngine
 def _setup_temp_db(name='test'):
     """Create a fresh test DB and patch sqlite3.connect to use it.
     Returns (test_db_path, original_connect_func) — pass both to _restore() in finally."""
-    test_db = f'/tmp/test_consolidated_{name}.db'
-    if os.path.exists(test_db):
-        os.remove(test_db)
+    # Use a unique file per test. Windows cannot remove a SQLite database
+    # while an earlier test still holds an unclosed connection; Linux often
+    # hides that leak by allowing unlink-on-open. Unique paths keep isolation
+    # deterministic on both platforms and cleanup remains best-effort.
+    test_db = str(_TEST_TMP / f'test_consolidated_{name}_{uuid.uuid4().hex}.db')
     # v14.4 robustness: also nuke any leftover Excel files from a previous test
     # that may have crashed mid-render. Failure to clean up causes the next test's
     # load_workbook to read a stale/truncated file → "BadZipFile" or "no such table" errors.
-    import glob as _glob
-    for _stale in _glob.glob('/tmp/NSE_BSE_*.xlsx'):
+    for _stale in glob.glob(str(_TEST_TMP / 'NSE_BSE_*.xlsx')):
         try: os.remove(_stale)
         except OSError: pass
     original = sqlite3.connect
@@ -72,10 +81,12 @@ def _restore(original_connect, test_db):
     purge any Excel artifacts the test may have produced."""
     sqlite3.connect = original_connect
     if os.path.exists(test_db):
-        os.remove(test_db)
+        try:
+            os.remove(test_db)
+        except PermissionError:
+            pass
     # v14.4 robustness: clean leaked Excel files so they don't poison sibling tests
-    import glob as _glob
-    for _stale in _glob.glob('/tmp/NSE_BSE_*.xlsx'):
+    for _stale in glob.glob(str(_TEST_TMP / 'NSE_BSE_*.xlsx')):
         try: os.remove(_stale)
         except OSError: pass
 
@@ -285,7 +296,7 @@ def test_fix2_normal_stocks_unchanged():
 def test_fix3_quick_pick_recomputed_after_ee_bonus():
     """When EE crosses a threshold due to the +8 convergence bonus,
     Quick Pick must be recomputed."""
-    sys.path.insert(0, '/home/claude/proj')
+    sys.path.insert(0, str(_REPO_ROOT))
     from analysis.scoring_engine import ScoringEngine
     se = ScoringEngine()
 
@@ -532,7 +543,7 @@ def test_fix2_internal_dict_untouched():
     it numeric.
     """
     # Read the actual master_funnel patch — verify it doesn't write "—" to mos_pct
-    with open('/home/claude/proj/master_funnel.py') as f:
+    with open(_REPO_ROOT / 'master_funnel.py', encoding='utf-8') as f:
         content = f.read()
     
     # The MoS label block should NOT have been changed
@@ -542,7 +553,7 @@ def test_fix2_internal_dict_untouched():
         "Patch wrongly writes '—' to internal dict — would break DB / sort"
     
     # The Excel patch should be display-only
-    with open('/home/claude/proj/reporting/excel_generator.py') as f:
+    with open(_REPO_ROOT / 'reporting' / 'excel_generator.py', encoding='utf-8') as f:
         ex_content = f.read()
     assert '_cfv_missing = (_cfv_for_display in (0, 0.0, None, "", "—"))' in ex_content
     assert 'val = "—"' in ex_content
@@ -1010,7 +1021,7 @@ def test_fix5_exit_alerts_dotted_verdict():
 
 def test_fix6_tooltip_explains_three_factor():
     """Tooltip should explain WHY DEEP VALUE EARLY MOVER uses 3 factors (combo + EE softening)."""
-    with open('/home/claude/proj/reporting/tooltip_formatter.py') as f:
+    with open(_REPO_ROOT / 'reporting' / 'tooltip_formatter.py', encoding='utf-8') as f:
         content = f.read()
     
     # Tooltip should mention the combo nature
@@ -1026,7 +1037,7 @@ def test_fix6_tooltip_explains_three_factor():
 
 def test_fix6_glossary_explains_three_factor():
     """Glossary entry for Quick Pick should also explain the asymmetry."""
-    with open('/home/claude/proj/reporting/excel_generator.py') as f:
+    with open(_REPO_ROOT / 'reporting' / 'excel_generator.py', encoding='utf-8') as f:
         content = f.read()
     # Find Quick Pick glossary entry
     qp_idx = content.find('"SCORES","Quick Pick"')
@@ -1293,18 +1304,18 @@ def test_g4_1_performance_sheet_appears_in_workbook():
             'bs_status': 'OK', 'early_entry_score': 30, 'spike_count': 0,
             'spike_triggers': [], 'label': 'WATCHLIST'}]
         from reporting.excel_generator import ExcelGeneratorV6
-        os.chdir('/tmp')
+        os.chdir(_TEST_TMP)
         gen = ExcelGeneratorV6(final_list, '20260507', run_time='10:00',
                                prev_scores={}, gap_days=0)
         master, _ = gen.generate_excel_reports()
         from openpyxl import load_workbook
-        wb = load_workbook(f"/tmp/{master}")
+        wb = load_workbook(_TEST_TMP / master)
         assert "🎯 Performance" in wb.sheetnames
         # Must come BEFORE Glossary in tab order
         idx_perf = wb.sheetnames.index("🎯 Performance")
         idx_gloss = wb.sheetnames.index("📖 Glossary")
         assert idx_perf < idx_gloss, "Performance should appear before Glossary"
-        os.remove(f"/tmp/{master}")
+        os.remove(_TEST_TMP / master)
     finally:
         _restore(original, test_db)
     return "✅ Performance sheet present, ordered before Glossary"
@@ -1322,16 +1333,16 @@ def test_g4_2_empty_db_shows_no_data_banner():
             'bs_status': 'OK', 'early_entry_score': 30, 'spike_count': 0,
             'spike_triggers': [], 'label': 'WATCHLIST'}]
         from reporting.excel_generator import ExcelGeneratorV6
-        os.chdir('/tmp')
+        os.chdir(_TEST_TMP)
         gen = ExcelGeneratorV6(final_list, '20260507', run_time='10:00',
                                prev_scores={}, gap_days=0)
         master, _ = gen.generate_excel_reports()
         from openpyxl import load_workbook
-        wb = load_workbook(f"/tmp/{master}")
+        wb = load_workbook(_TEST_TMP / master)
         ws = wb["🎯 Performance"]
         banner = str(ws.cell(3,1).value or "")
         assert "No Gold-pick history" in banner or "tracking starts" in banner
-        os.remove(f"/tmp/{master}")
+        os.remove(_TEST_TMP / master)
     finally:
         _restore(original, test_db)
     return "✅ Empty DB shows graceful 'no data yet' banner"
@@ -1368,12 +1379,12 @@ def test_g4_3_full_data_renders_all_sections():
             'bs_status': 'OK', 'early_entry_score': 30, 'spike_count': 0,
             'spike_triggers': [], 'label': 'WATCHLIST'}]
         from reporting.excel_generator import ExcelGeneratorV6
-        os.chdir('/tmp')
+        os.chdir(_TEST_TMP)
         gen = ExcelGeneratorV6(final_list, '20260507', run_time='10:00',
                                prev_scores={}, gap_days=0)
         master, _ = gen.generate_excel_reports()
         from openpyxl import load_workbook
-        wb = load_workbook(f"/tmp/{master}")
+        wb = load_workbook(_TEST_TMP / master)
         ws = wb["🎯 Performance"]
         # Look for each section header somewhere in the sheet
         all_text = ' '.join(str(ws.cell(r, 1).value or '') for r in range(1, 80))
@@ -1381,7 +1392,7 @@ def test_g4_3_full_data_renders_all_sections():
         assert "SPEED" in all_text, "Missing SPEED section"
         assert "DIAGNOSTIC" in all_text, "Missing DIAGNOSTIC section"
         assert "OPEN POSITIONS" in all_text, "Missing OPEN POSITIONS section"
-        os.remove(f"/tmp/{master}")
+        os.remove(_TEST_TMP / master)
     finally:
         _restore(original, test_db)
     return "✅ All 4 sections render with full data"
@@ -1792,17 +1803,17 @@ def test_g6_by_time_horizon_breakdown_appears():
             'early_entry_score': 30, 'spike_count': 0, 'spike_triggers': [],
             'label': 'WATCHLIST'}]
         from reporting.excel_generator import ExcelGeneratorV6
-        os.chdir('/tmp')
+        os.chdir(_TEST_TMP)
         gen = ExcelGeneratorV6(final_list, '20260507', run_time='10:00',
                                prev_scores={}, gap_days=0)
         master, _ = gen.generate_excel_reports()
         from openpyxl import load_workbook
-        wb = load_workbook(f"/tmp/{master}")
+        wb = load_workbook(_TEST_TMP / master)
         ws = wb["🎯 Performance"]
         # Look for "BY TIME HORIZON" header row anywhere in the sheet
         all_text = ' '.join(str(ws.cell(r, 1).value or '') for r in range(1, 80))
         assert "BY TIME HORIZON" in all_text, "BY TIME HORIZON breakdown missing"
-        os.remove(f"/tmp/{master}")
+        os.remove(_TEST_TMP / master)
     finally:
         _restore(original, test_db)
     return "✅ BY TIME HORIZON breakdown table appears in Performance sheet"
@@ -1830,12 +1841,12 @@ def test_g6_open_positions_has_new_columns():
             'early_entry_score': 30, 'spike_count': 0, 'spike_triggers': [],
             'label': 'WATCHLIST'}]
         from reporting.excel_generator import ExcelGeneratorV6
-        os.chdir('/tmp')
+        os.chdir(_TEST_TMP)
         gen = ExcelGeneratorV6(final_list, '20260507', run_time='10:00',
                                prev_scores={}, gap_days=0)
         master, _ = gen.generate_excel_reports()
         from openpyxl import load_workbook
-        wb = load_workbook(f"/tmp/{master}")
+        wb = load_workbook(_TEST_TMP / master)
         ws = wb["🎯 Performance"]
         # Find header row that contains 'Time Horizon' AND 'Re-app' AND 'Days Left'
         # Strict: looks for exact 'Time Horizon' label (not bare 'Horizon')
@@ -1855,7 +1866,7 @@ def test_g6_open_positions_has_new_columns():
             f"Gold sheet should have 'Time Horizon' header, got: {[h for h in gold_headers if h]}"
         assert 'Horizon' not in gold_headers, \
             f"Gold sheet should NOT have bare 'Horizon' header (rename incomplete)"
-        os.remove(f"/tmp/{master}")
+        os.remove(_TEST_TMP / master)
     finally:
         _restore(original, test_db)
     return "✅ Open Positions + Gold sheet use 'Time Horizon' label consistently"
@@ -1894,18 +1905,18 @@ def test_g7_expired_missed_runup_diagnostic():
             'early_entry_score': 30, 'spike_count': 0, 'spike_triggers': [],
             'label': 'WATCHLIST'}]
         from reporting.excel_generator import ExcelGeneratorV6
-        os.chdir('/tmp')
+        os.chdir(_TEST_TMP)
         gen = ExcelGeneratorV6(final_list, '20260507', run_time='10:00',
                                prev_scores={}, gap_days=0)
         master, _ = gen.generate_excel_reports()
         from openpyxl import load_workbook
-        wb = load_workbook(f"/tmp/{master}")
+        wb = load_workbook(_TEST_TMP / master)
         ws = wb["🎯 Performance"]
         all_text = ' '.join(str(ws.cell(r, c).value or '') for r in range(1, 100) for c in range(1, 14))
         assert "MISSED RUNUP" in all_text, "EXPIRED missed runup diagnostic missing"
         # Average should be (5+12+18+25)/4 = 15.0
         assert "+15.0%" in all_text, "Average missed runup not computed correctly"
-        os.remove(f"/tmp/{master}")
+        os.remove(_TEST_TMP / master)
     finally:
         _restore(original, test_db)
     return "✅ EXPIRED missed-runup diagnostic renders with correct average"
@@ -1936,18 +1947,18 @@ def test_g7_no_diagnostic_when_few_expired():
             'early_entry_score': 30, 'spike_count': 0, 'spike_triggers': [],
             'label': 'WATCHLIST'}]
         from reporting.excel_generator import ExcelGeneratorV6
-        os.chdir('/tmp')
+        os.chdir(_TEST_TMP)
         gen = ExcelGeneratorV6(final_list, '20260507', run_time='10:00',
                                prev_scores={}, gap_days=0)
         master, _ = gen.generate_excel_reports()
         from openpyxl import load_workbook
-        wb = load_workbook(f"/tmp/{master}")
+        wb = load_workbook(_TEST_TMP / master)
         ws = wb["🎯 Performance"]
         all_text = ' '.join(str(ws.cell(r, c).value or '') for r in range(1, 100) for c in range(1, 14))
         # Only 2 expired → diagnostic shouldn't render
         assert "MISSED RUNUP DIAGNOSTIC" not in all_text, \
             "Diagnostic rendered with too few samples"
-        os.remove(f"/tmp/{master}")
+        os.remove(_TEST_TMP / master)
     finally:
         _restore(original, test_db)
     return "✅ Missed-runup diagnostic suppressed when <3 expired rows"
@@ -1963,7 +1974,7 @@ def test_g8_master_funnel_reads_horizon_key_not_time_horizon():
     empty for all production rows. v14.1 reads 'horizon' and passes it
     as 'time_horizon' to the helper (which is the column name)."""
     # Verify by inspecting the master_funnel source
-    with open('/home/claude/proj/master_funnel.py') as f:
+    with open(_REPO_ROOT / 'master_funnel.py', encoding='utf-8') as f:
         content = f.read()
     # The v14.1 hook should read 'horizon' from the stock dict.
     # The literal pattern '_grow.get("horizon"' must appear.
@@ -2071,12 +2082,12 @@ def test_g13_performance_sheet_value_correctness_audit():
             'int_coverage': 5.0, 'bs_status': 'OK', 'early_entry_score': 30,
             'spike_count': 0, 'spike_triggers': [], 'label': 'WATCHLIST'}]
         from reporting.excel_generator import ExcelGeneratorV6
-        os.chdir('/tmp')
+        os.chdir(_TEST_TMP)
         gen = ExcelGeneratorV6(final_list, '20260601', run_time='10:00 IST',
                                prev_scores={}, gap_days=0)
         master, _ = gen.generate_excel_reports()
         from openpyxl import load_workbook
-        wb = load_workbook(f"/tmp/{master}")
+        wb = load_workbook(_TEST_TMP / master)
         ws = wb["🎯 Performance"]
 
         # Helper: find row by partial text match
@@ -2119,7 +2130,7 @@ def test_g13_performance_sheet_value_correctness_audit():
         banner = cv(3, 1)
         assert "sample size is meaningful" in banner, f"Banner not green: {banner!r}"
 
-        os.remove(f"/tmp/{master}")
+        os.remove(_TEST_TMP / master)
     finally:
         _restore(original, test_db)
     return "✅ Comprehensive value-correctness audit (16 calculation invariants verified)"
@@ -2215,7 +2226,7 @@ def test_g14_closed_positions_section_renders_correctly():
                     current_price=out_p, current_pnl_pct=(out_p-100),
                     last_checked_date=today.strftime("%Y-%m-%d"))
 
-        os.chdir('/tmp')
+        os.chdir(_TEST_TMP)
         final_list = [{'symbol': 'D', 'verdict': 'N', 'composite_score': 50,
             'mos_pct': 0, 'storm_score': 5, 'rsi': 50, 'pledge_pct': 0,
             'spike_suppressed': False, 'sector': 'T', 'close': 100,
@@ -2226,7 +2237,7 @@ def test_g14_closed_positions_section_renders_correctly():
         gen = ExcelGeneratorV6(final_list, '20260601', run_time='10:00 IST',
                                prev_scores={}, gap_days=0)
         master, _ = gen.generate_excel_reports()
-        wb = load_workbook(f"/tmp/{master}")
+        wb = load_workbook(_TEST_TMP / master)
         ws = wb["🎯 Performance"]
 
         def find_row(text):
@@ -2294,7 +2305,7 @@ def test_g14_closed_positions_section_renders_correctly():
                 break
         assert summary_found, "Summary footer not found in CLOSED POSITIONS"
 
-        os.remove(f"/tmp/{master}")
+        os.remove(_TEST_TMP / master)
     finally:
         _restore(original, test_db)
 
@@ -5593,7 +5604,7 @@ def test_g11_tracker_invoked_from_master_funnel():
     Fix: invoke from inside master_funnel between v14 hook and Excel build, so
     Performance sheet sees fresh price/P&L data.
     """
-    with open('/home/claude/proj/master_funnel.py') as f:
+    with open(_REPO_ROOT / 'master_funnel.py', encoding='utf-8') as f:
         text = f.read()
     # Tracker import + invocation must both be present
     assert 'from track_outcomes import main' in text, (
@@ -5626,7 +5637,7 @@ def test_g10_v14_hook_fires_before_excel_generation():
     Fix: write to DB first, then render. Then the Performance sheet's
     get_outcome_stats() reads the row we just inserted for today.
     """
-    with open('/home/claude/proj/master_funnel.py') as f:
+    with open(_REPO_ROOT / 'master_funnel.py', encoding='utf-8') as f:
         text = f.read()
     # Locate the two anchors
     hook_anchor = text.find('OUTCOME TRACKING: Log Gold-sheet picks')
@@ -5650,9 +5661,9 @@ def test_g9_column_name_consistency_time_horizon_everywhere():
        - Tooltip Reference category
        The bare 'Horizon' label should NOT appear anywhere as a column header."""
     # Read excel_generator.py and tooltip_formatter.py source
-    with open('/home/claude/proj/reporting/excel_generator.py') as f:
+    with open(_REPO_ROOT / 'reporting' / 'excel_generator.py', encoding='utf-8') as f:
         eg = f.read()
-    with open('/home/claude/proj/reporting/tooltip_formatter.py') as f:
+    with open(_REPO_ROOT / 'reporting' / 'tooltip_formatter.py', encoding='utf-8') as f:
         tf = f.read()
     # Must NOT appear: ("Horizon", or "Horizon": as a glossary or column header
     # (excluding within prose strings — search for tuple/dict literal forms)
@@ -5694,11 +5705,11 @@ if __name__ == '__main__':
     # or stale-DB errors. Per-test cleanup also exists in _setup_temp_db /
     # _restore, but a clean suite start is the most reliable safeguard.
     import glob as _start_glob
-    for _f in _start_glob.glob('/tmp/NSE_BSE_*.xlsx') + _start_glob.glob('/tmp/test_consolidated_*.db'):
+    for _f in _start_glob.glob(str(_REPO_ROOT / 'NSE_BSE_*.xlsx')) + _start_glob.glob(str(_TEST_TMP / 'test_consolidated_*.db')):
         try: os.remove(_f)
         except OSError: pass
 
-    # Stability harness — some tests do os.chdir('/tmp') and don't restore CWD.
+    # Stability harness — some tests change into the shared temp directory.
     # Subsequent tests can then fail with FileNotFoundError or readonly-DB errors
     # if their working dir has been replaced. Snapshot the runner's starting CWD
     # and restore it before every test by monkey-patching the runner's local lookup.
@@ -5715,7 +5726,7 @@ if __name__ == '__main__':
 
     def _run_one_test(fn):
         """Execute one test with full per-test isolation:
-           1. restore CWD (some tests do os.chdir('/tmp') and don't restore)
+           1. restore CWD (some tests change directory and don't restore)
            2. clean any /tmp leftover Excel files (defensive — _setup_temp_db
               also does this, but tests not using that helper still benefit)
            3. run, classify result by exception type
@@ -5723,7 +5734,7 @@ if __name__ == '__main__':
         """
         os.chdir(_RUNNER_START_CWD)
         import glob as _g
-        for _f in _g.glob('/tmp/NSE_BSE_*.xlsx'):
+        for _f in _g.glob(str(_REPO_ROOT / 'NSE_BSE_*.xlsx')):
             try: os.remove(_f)
             except OSError: pass
         name = fn.__name__

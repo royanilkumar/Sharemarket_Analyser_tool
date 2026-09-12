@@ -92,13 +92,36 @@ def audit_open_positions(db_path: str = "market_data.db") -> Dict[str, Any]:
             if not open_rows:
                 return out
 
-            # Get current universe
+            # Get the latest traded universe first. latest_analysis_results is
+            # only the top-100 analysis sample, so using it alone would flag a
+            # healthy stock merely because it fell outside today's ranking.
+            universe = set()
             try:
-                c.execute("SELECT DISTINCT symbol FROM latest_analysis_results")
-                universe = set(row[0] for row in c.fetchall() if row[0])
+                latest_date = c.execute(
+                    "SELECT MAX(date) FROM daily_prices WHERE exchange = 'NSE'"
+                ).fetchone()[0]
+                if latest_date:
+                    c.execute(
+                        "SELECT DISTINCT symbol FROM daily_prices "
+                        "WHERE exchange = 'NSE' AND date = ?",
+                        (latest_date,),
+                    )
+                    universe.update(row[0] for row in c.fetchall() if row[0])
             except sqlite3.OperationalError:
-                # No latest_analysis_results table yet — can't audit. Return
-                # informative status rather than crashing.
+                pass
+
+            # Fall back to the analyzed universe for legacy or partially
+            # initialized databases that have no current NSE price rows.
+            if not universe:
+                try:
+                    c.execute("SELECT DISTINCT symbol FROM latest_analysis_results")
+                    universe.update(row[0] for row in c.fetchall() if row[0])
+                except sqlite3.OperationalError:
+                    out["audit_status"] = "UNIVERSE_UNAVAILABLE"
+                    out["n_open_total"] = len(open_rows)
+                    return out
+
+            if not universe:
                 out["audit_status"] = "UNIVERSE_UNAVAILABLE"
                 out["n_open_total"] = len(open_rows)
                 return out
